@@ -71,7 +71,35 @@ async function fetchUserItems(browser, handle) {
     await ctx.close();
     return { items: [], error: `failed to load @${handle}` };
   }
-}
+  async function refreshCountsForRecent(browser, posts) {
+  // sequential and lightweight (good for beginners); later you can parallelize
+  for (const p of posts) {
+    if (p.stats?.playCount > 0) continue; // already has a number
+    const ctx = await browser.newContext({
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+      locale: "en-US"
+    });
+    await ctx.route('**/*', (route) => {
+      const u = route.request().url();
+      if (u.match(/\.(png|jpg|jpeg|gif|webp|svg)$/i)) return route.abort();
+      return route.continue();
+    });
+    const page = await ctx.newPage();
+    try {
+      await page.goto(p.url, { waitUntil: "domcontentloaded", timeout: 60000 });
+      await page.waitForSelector('script#SIGI_STATE', { timeout: 15000 });
+      const html = await page.content();
+      const state = parseFromSIGI(html);
+      const again = itemsFromState(state)[0];
+      if (again?.stats?.playCount != null) {
+        p.stats.playCount = Number(again.stats.playCount);
+        p.stats.diggCount = Number(again.stats.diggCount || 0);
+        p.stats.commentCount = Number(again.stats.commentCount || 0);
+      }
+    } catch(_) {}
+    await ctx.close();
+  }
+  return posts;
 }
 async function sendDiscord(text) {
   const chunks = text.match(/[\s\S]{1,1800}/g) || [];
