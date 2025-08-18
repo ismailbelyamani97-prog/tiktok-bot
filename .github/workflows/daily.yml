@@ -1,7 +1,7 @@
 name: daily-tiktok-report
 on:
   schedule:
-    - cron: "0 9 * * *"   # every day at 09:00 UTC; change if you want
+    - cron: "0 9 * * *"   # every day at 09:00 UTC
   workflow_dispatch:
 
 jobs:
@@ -14,14 +14,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: install deps (playwright + axios)
-        run: |
-          npm i axios playwright
-          npx playwright install --with-deps chromium
+      - name: install deps
+        run: npm i axios
       - name: run script
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
-          MIN_VIEWS: "50"      # override if you like
-          LOOKBACK_HOURS: "48" # override if you like
+          # You can override defaults here if you want:
+          MIN_VIEWS: "50"
+          LOOKBACK_HOURS: "48"
         run: node main.mjs
