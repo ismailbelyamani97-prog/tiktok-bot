@@ -1,25 +1,28 @@
-name: TikTok Daily Report
+name: Daily TikTok Scraper
 
 on:
   schedule:
-    - cron: "0 */12 * * *"   # every 12h
+    - cron: "0 */12 * * *"  # runs every 12 hours
   workflow_dispatch:
 
 jobs:
-  build:
+  scrape:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+
       - name: Setup Node
         uses: actions/setup-node@v3
         with:
           node-version: 18
-      - name: Install deps
-        run: npm install playwright axios
-      - name: Run script
+
+      - name: Install dependencies
+        run: |
+          npm install playwright
+
+      - name: Install Playwright Browsers
+        run: |
+          npx playwright install --with-deps
+
+      - name: Run scraper
         run: node main.mjs
-        env:
-          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
-          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-          MIN_VIEWS: 50
-          LOOKBACK_HOURS: 48
