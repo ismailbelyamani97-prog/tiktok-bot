@@ -1,73 +1,58 @@
 import fs from "fs";
 import fetch from "node-fetch";
 
-const DISCORD_WEBHOOK = "YOUR_DISCORD_WEBHOOK_HERE"; // replace with your webhook
-const links = fs.readFileSync("./links.txt", "utf-8").split("\n").filter(Boolean);
+const DISCORD_WEBHOOK = "YOUR_DISCORD_WEBHOOK_HERE"; // put your webhook here
+const accounts = fs.readFileSync("./accounts.txt", "utf-8").split("\n").filter(Boolean);
 
-function daysAgo(dateStr) {
-  const postDate = new Date(dateStr);
-  const diff = Date.now() - postDate.getTime();
-  return Math.floor(diff / (1000 * 60 * 60 * 24));
-}
-
-async function fetchVideoStats(url) {
+async function fetchLastPost(username) {
   try {
-    const res = await fetch(`${url}?__a=1&__d=dis`, {
-      headers: {
-        "User-Agent": "Mozilla/5.0" // looks human
-      }
+    const url = `https://www.tiktok.com/@${username}?__a=1&__d=dis`;
+    const res = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0" }
     });
+
     if (!res.ok) return null;
     const data = await res.json();
+    const posts = data?.props?.pageProps?.items;
+    if (!posts || posts.length === 0) return null;
 
-    const item = data?.props?.pageProps?.itemInfo?.itemStruct;
-    if (!item) return null;
-
+    const last = posts[0];
     return {
-      id: item.id,
-      url: `https://www.tiktok.com/@${item.author.uniqueId}/video/${item.id}`,
-      views: item.stats.playCount,
-      likes: item.stats.diggCount,
-      comments: item.stats.commentCount,
-      shares: item.stats.shareCount,
-      createTime: new Date(item.createTime * 1000).toISOString(),
-      author: item.author.uniqueId
+      url: `https://www.tiktok.com/@${username}/video/${last.id}`,
+      views: last.stats.playCount,
+      author: username
     };
-  } catch (err) {
-    console.error("Error fetching:", url, err.message);
+  } catch (e) {
+    console.error(`Error fetching ${username}:`, e.message);
     return null;
   }
 }
 
 async function main() {
-  let allPosts = [];
+  let results = [];
 
-  for (const link of links) {
-    const post = await fetchVideoStats(link);
-    if (post && daysAgo(post.createTime) <= 7 && post.views > 100) {
-      allPosts.push(post);
-    }
+  for (const account of accounts) {
+    const post = await fetchLastPost(account);
+    if (post) results.push(post);
   }
 
-  allPosts.sort((a, b) => b.views - a.views);
-
-  if (allPosts.length === 0) {
-    console.log("No qualifying posts found.");
+  if (results.length === 0) {
+    console.log("No posts found.");
     return;
   }
 
-  let description = allPosts.map((p, i) => {
-    return `${i + 1}. Post gained **${p.views.toLocaleString()} views**\n` +
-           `[Post Link](${p.url}) | @${p.author} | ` +
-           `${p.views.toLocaleString()} views | ${p.likes.toLocaleString()} likes | ${p.comments.toLocaleString()} coms.\n` +
-           `posted ${daysAgo(p.createTime)} day(s) ago\n`;
+  // sort by views (desc)
+  results.sort((a, b) => b.views - a.views);
+
+  let description = results.map((p, i) => {
+    return `${i + 1}. [Post Link](${p.url}) by @${p.author} — **${p.views.toLocaleString()} views**`;
   }).join("\n");
 
   const embed = {
     username: "Greenscreen AI",
     embeds: [
       {
-        title: "Check Notification (last 7 days)",
+        title: "Latest Posts (sorted by views)",
         description,
         color: 0x00ff00
       }
