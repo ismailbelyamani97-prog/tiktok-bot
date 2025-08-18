@@ -1,26 +1,25 @@
-name: daily-tiktok-report
+name: TikTok Daily Report
+
 on:
   schedule:
-    - cron: "0 9 * * *"   # every day at 09:00 UTC
+    - cron: "0 */12 * * *"   # every 12h
   workflow_dispatch:
 
 jobs:
-  run:
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v3
+      - name: Setup Node
+        uses: actions/setup-node@v3
         with:
-          node-version: "20"
-      - name: install deps
-        run: npm i axios
-      - name: run script
-        env:
-          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
-          # You can override defaults here if you want:
-          MIN_VIEWS: "50"
-          LOOKBACK_HOURS: "48"
+          node-version: 18
+      - name: Install deps
+        run: npm install playwright axios
+      - name: Run script
         run: node main.mjs
+        env:
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          MIN_VIEWS: 50
+          LOOKBACK_HOURS: 48
