@@ -3,7 +3,7 @@ import fetch from "node-fetch";
 import { chromium } from "playwright";
 
 // Load accounts
-const accounts = JSON.parse(fs.readFileSync("./accounts.json", "utf8"));
+const accounts = JSON.parse(fs.readFileSync("./accounts.txt", "utf8"));
 const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK;
 const VIEW_THRESHOLD = 50;
 const TIME_LIMIT_HOURS = 48;
