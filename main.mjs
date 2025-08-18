@@ -4,6 +4,9 @@ import fs from "fs/promises";
 
 const CHANNEL = process.env.DISCORD_CHANNEL_ID;
 const BOT = process.env.DISCORD_BOT_TOKEN;
+
+// Defaults are 50 views over the last 48 hours.
+// You can still override via env if you want.
 const MIN_VIEWS = Number(process.env.MIN_VIEWS || 50);
 const LOOKBACK_HOURS = Number(process.env.LOOKBACK_HOURS || 48);
 
@@ -22,6 +25,7 @@ function parseFromSIGI(html) {
   if (!m) return null;
   return JSON.parse(m[1]);
 }
+
 function itemsFromState(state) {
   const mod = state?.ItemModule || {};
   return Object.values(mod).map(v => ({
@@ -34,13 +38,15 @@ function itemsFromState(state) {
       commentCount: Number(v.stats?.commentCount || 0),
     }
   }));
+}
+
 async function fetchUserItems(browser, handle) {
   const ctx = await browser.newContext({
     userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
     locale: "en-US"
   });
 
-  // block images to speed things up
+  // Block images to speed up
   await ctx.route('**/*', (route) => {
     const u = route.request().url();
     if (u.match(/\.(png|jpg|jpeg|gif|webp|svg)$/i)) return route.abort();
@@ -52,11 +58,10 @@ async function fetchUserItems(browser, handle) {
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-    // accept cookies if shown
-    const accept = page.locator('button:has-text("Accept all")');
-    await accept.click({ timeout: 3000 }).catch(()=>{});
+    // Cookie popup (ignore if not there)
+    await page.locator('button:has-text("Accept all")').click({ timeout: 3000 }).catch(()=>{});
 
-    // wait for TikTok’s data blob
+    // Wait for TikTok’s JSON blob
     await page.waitForSelector('script#SIGI_STATE', { timeout: 15000 });
 
     const html = await page.content();
@@ -71,10 +76,14 @@ async function fetchUserItems(browser, handle) {
     await ctx.close();
     return { items: [], error: `failed to load @${handle}` };
   }
-  async function refreshCountsForRecent(browser, posts) {
-  // sequential and lightweight (good for beginners); later you can parallelize
+}
+
+// Fallback: open each video page to refresh counts if profile JSON was stale
+async function refreshCountsForRecent(browser, posts) {
   for (const p of posts) {
-    if (p.stats?.playCount > 0) continue; // already has a number
+    // If we already have a non-zero count, skip
+    if (p.stats?.playCount > 0) continue;
+
     const ctx = await browser.newContext({
       userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
       locale: "en-US"
@@ -84,6 +93,7 @@ async function fetchUserItems(browser, handle) {
       if (u.match(/\.(png|jpg|jpeg|gif|webp|svg)$/i)) return route.abort();
       return route.continue();
     });
+
     const page = await ctx.newPage();
     try {
       await page.goto(p.url, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -101,6 +111,7 @@ async function fetchUserItems(browser, handle) {
   }
   return posts;
 }
+
 async function sendDiscord(text) {
   const chunks = text.match(/[\s\S]{1,1800}/g) || [];
   for (const c of chunks) {
@@ -121,25 +132,58 @@ async function sendDiscord(text) {
                     .split(/\r?\n/).map(s => s.trim()).filter(Boolean);
 
   let viral = [];
+  let debugLines = [];
+
   for (const h of handles) {
-    const items = await fetchUserItems(browser, h);
+    const { items, error } = await fetchUserItems(browser, h);
+    if (error) { debugLines.push(`@${h}: ${error}`); continue; }
+
     const recent = items.filter(v => v.createTime >= cutoff);
-    const qualified = recent.filter(v => v.stats.playCount >= MIN_VIEWS)
-                            .map(v => ({ ...v, author: h }));
+
+    // Refresh counts from each video page if needed
+    await refreshCountsForRecent(browser, recent);
+
+    if (recent.length) {
+      const top = [...recent].sort((a,b)=> b.stats.playCount - a.stats.playCount)[0];
+      debugLines.push(`@${h}: ${recent.length} recent; top ${top.stats.playCount.toLocaleString()} views`);
+    } else {
+      debugLines.push(`@${h}: 0 recent posts`);
+    }
+
+    const qualified = recent
+      .filter(v => v.stats.playCount >= MIN_VIEWS)
+      .map(v => ({ ...v, author: h }));
+
     viral.push(...qualified);
   }
+
   await browser.close();
 
-  viral.sort((a,b)=> b.stats.playCount - a.stats.playCount);
-
-  let out = [`Check Notification (last ${LOOKBACK_HOURS}H)`];
-  viral.forEach((v,i)=>{
-    out.push(`${i+1}. Post gained ${n(v.stats.playCount)} views`);
-    out.push(`${v.url} | @${v.author} | ${n(v.stats.playCount)} views | ${n(v.stats.diggCount)} likes | ${n(v.stats.commentCount)} coms.`);
-    out.push(`posted ${ago(now, v.createTime)}`);
-    out.push("");
+  // Group by handle for cleaner output
+  const byHandle = new Map();
+  viral.forEach(v => {
+    if (!byHandle.has(v.author)) byHandle.set(v.author, []);
+    byHandle.get(v.author).push(v);
   });
-  if (!viral.length) out.push(`No posts ≥ ${n(MIN_VIEWS)} views in the last ${LOOKBACK_HOURS}h.`);
+  // Sort each handle group by views desc
+  for (const [h, arr] of byHandle.entries()) arr.sort((a,b)=> b.stats.playCount - a.stats.playCount);
+
+  let out = [`Check Notification (last ${LOOKBACK_HOURS}H, ≥ ${n(MIN_VIEWS)} views)`];
+
+  if (byHandle.size) {
+    for (const [h, arr] of byHandle.entries()) {
+      out.push(`@${h} → ${arr.length} post(s) ≥ ${n(MIN_VIEWS)} views`);
+      for (const v of arr) {
+        out.push(`${v.url} | ${n(v.stats.playCount)} views | ${n(v.stats.diggCount)} likes | ${n(v.stats.commentCount)} coms. | posted ${ago(now, v.createTime)}`);
+      }
+      out.push(""); // blank line between creators
+    }
+  } else {
+    out.push(`No posts ≥ ${n(MIN_VIEWS)} views in the last ${LOOKBACK_HOURS}h.`);
+    out.push("");
+    out.push("Debug:");
+    out.push(...debugLines);
+  }
 
   await sendDiscord(out.join("\n"));
 })();
