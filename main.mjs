@@ -34,17 +34,31 @@ function itemsFromState(state) {
       commentCount: Number(v.stats?.commentCount || 0),
     }
   }));
-}
 async function fetchUserItems(browser, handle) {
   const ctx = await browser.newContext({
     userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
     locale: "en-US"
   });
+
+  // block images to speed things up
+  await ctx.route('**/*', (route) => {
+    const u = route.request().url();
+    if (u.match(/\.(png|jpg|jpeg|gif|webp|svg)$/i)) return route.abort();
+    return route.continue();
+  });
+
   const page = await ctx.newPage();
   const url = `https://www.tiktok.com/@${handle}`;
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-    await sleep(1500);
+
+    // accept cookies if shown
+    const accept = page.locator('button:has-text("Accept all")');
+    await accept.click({ timeout: 3000 }).catch(()=>{});
+
+    // wait for TikTok’s data blob
+    await page.waitForSelector('script#SIGI_STATE', { timeout: 15000 });
+
     const html = await page.content();
     const state = parseFromSIGI(html);
     const items = itemsFromState(state).map(v => ({
@@ -52,11 +66,12 @@ async function fetchUserItems(browser, handle) {
       url: `https://www.tiktok.com/@${handle}/video/${v.id}`
     }));
     await ctx.close();
-    return items;
-  } catch {
+    return { items, error: null };
+  } catch (e) {
     await ctx.close();
-    return [];
+    return { items: [], error: `failed to load @${handle}` };
   }
+}
 }
 async function sendDiscord(text) {
   const chunks = text.match(/[\s\S]{1,1800}/g) || [];
