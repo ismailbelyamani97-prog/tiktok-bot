@@ -4,7 +4,7 @@ import fs from "fs/promises";
 
 const CHANNEL = process.env.DISCORD_CHANNEL_ID;
 const BOT = process.env.DISCORD_BOT_TOKEN;
-const MIN_VIEWS = Number(process.env.MIN_VIEWS || 100000);
+const MIN_VIEWS = Number(process.env.MIN_VIEWS || 20000);
 const LOOKBACK_HOURS = Number(process.env.LOOKBACK_HOURS || 24);
 
 const n = (x) => (x || 0).toLocaleString("en-US");
