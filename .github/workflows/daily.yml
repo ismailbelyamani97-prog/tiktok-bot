@@ -1,7 +1,7 @@
 name: daily-tiktok-report
 on:
   schedule:
-    - cron: "0 9 * * *"   # every day at 09:00 UTC; change if you like
+    - cron: "0 9 * * *"   # every day at 09:00 UTC; change if you want
   workflow_dispatch:
 
 jobs:
@@ -22,7 +22,6 @@ jobs:
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
-          # You can override the defaults here if you like:
-          MIN_VIEWS: "50"
-          LOOKBACK_HOURS: "48"
+          MIN_VIEWS: "50"      # override if you like
+          LOOKBACK_HOURS: "48" # override if you like
         run: node main.mjs
