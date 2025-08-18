@@ -1,92 +1,86 @@
 import fs from "fs";
 import fetch from "node-fetch";
-import { chromium } from "playwright";
 
-// Load accounts
-const accounts = JSON.parse(fs.readFileSync("./accounts.txt", "utf8"));
-const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK;
-const VIEW_THRESHOLD = 50;
-const TIME_LIMIT_HOURS = 48;
+const DISCORD_WEBHOOK = "YOUR_DISCORD_WEBHOOK_HERE"; // replace with your webhook
+const links = fs.readFileSync("./links.txt", "utf-8").split("\n").filter(Boolean);
 
-async function scrapeAccount(browser, url) {
-  const context = await browser.newContext({
-    userAgent:
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-  });
-  const page = await context.newPage();
+function daysAgo(dateStr) {
+  const postDate = new Date(dateStr);
+  const diff = Date.now() - postDate.getTime();
+  return Math.floor(diff / (1000 * 60 * 60 * 24));
+}
 
+async function fetchVideoStats(url) {
   try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+    const res = await fetch(`${url}?__a=1&__d=dis`, {
+      headers: {
+        "User-Agent": "Mozilla/5.0" // looks human
+      }
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
 
-    // scroll human-like
-    for (let i = 0; i < 3; i++) {
-      await page.mouse.wheel(0, 400);
-      await page.waitForTimeout(1500 + Math.random() * 1000);
-    }
+    const item = data?.props?.pageProps?.itemInfo?.itemStruct;
+    if (!item) return null;
 
-    // grab video blocks
-    const videos = await page.$$eval("a[href*='/video/']", (els) =>
-      els.map((el) => {
-        const parent = el.closest("div[data-e2e='user-post-item']") || el;
-        const viewsEl = parent.querySelector("strong");
-        return {
-          link: el.href,
-          views: viewsEl ? viewsEl.innerText : "0",
-        };
-      })
-    );
-
-    return videos;
+    return {
+      id: item.id,
+      url: `https://www.tiktok.com/@${item.author.uniqueId}/video/${item.id}`,
+      views: item.stats.playCount,
+      likes: item.stats.diggCount,
+      comments: item.stats.commentCount,
+      shares: item.stats.shareCount,
+      createTime: new Date(item.createTime * 1000).toISOString(),
+      author: item.author.uniqueId
+    };
   } catch (err) {
-    return { error: `failed to load ${url}: ${err.message}` };
-  } finally {
-    await context.close();
+    console.error("Error fetching:", url, err.message);
+    return null;
   }
 }
 
-function parseViews(viewStr) {
-  if (!viewStr) return 0;
-  viewStr = viewStr.toLowerCase();
-  if (viewStr.endsWith("k")) return parseFloat(viewStr) * 1000;
-  if (viewStr.endsWith("m")) return parseFloat(viewStr) * 1000000;
-  return parseInt(viewStr.replace(/\D/g, "")) || 0;
-}
+async function main() {
+  let allPosts = [];
 
-async function sendDiscord(msg) {
+  for (const link of links) {
+    const post = await fetchVideoStats(link);
+    if (post && daysAgo(post.createTime) <= 7 && post.views > 100) {
+      allPosts.push(post);
+    }
+  }
+
+  allPosts.sort((a, b) => b.views - a.views);
+
+  if (allPosts.length === 0) {
+    console.log("No qualifying posts found.");
+    return;
+  }
+
+  let description = allPosts.map((p, i) => {
+    return `${i + 1}. Post gained **${p.views.toLocaleString()} views**\n` +
+           `[Post Link](${p.url}) | @${p.author} | ` +
+           `${p.views.toLocaleString()} views | ${p.likes.toLocaleString()} likes | ${p.comments.toLocaleString()} coms.\n` +
+           `posted ${daysAgo(p.createTime)} day(s) ago\n`;
+  }).join("\n");
+
+  const embed = {
+    username: "Greenscreen AI",
+    embeds: [
+      {
+        title: "Check Notification (last 7 days)",
+        description,
+        color: 0x00ff00
+      }
+    ]
+  };
+
   await fetch(DISCORD_WEBHOOK, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content: msg }),
+    body: JSON.stringify(embed)
   });
+
+  console.log("✅ Sent to Discord");
 }
 
-(async () => {
-  const browser = await chromium.launch({ headless: true });
-  let report = `✅ TikTok Check (last ${TIME_LIMIT_HOURS}h, ≥${VIEW_THRESHOLD} views)\n\n`;
-
-  for (const url of accounts) {
-    const result = await scrapeAccount(browser, url);
-
-    if (result.error) {
-      report += `⚠️ ${result.error}\n`;
-      continue;
-    }
-
-    let hits = [];
-    for (const v of result) {
-      const views = parseViews(v.views);
-      if (views >= VIEW_THRESHOLD) {
-        hits.push(`${views} views → ${v.link}`);
-      }
-    }
-
-    if (hits.length > 0) {
-      report += `🔹 ${url}\n${hits.join("\n")}\n\n`;
-    } else {
-      report += `❌ ${url} → No posts ≥ ${VIEW_THRESHOLD} views\n`;
-    }
-  }
-
-  await sendDiscord(report);
-  await browser.close();
-})();
+main();
