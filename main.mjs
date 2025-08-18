@@ -1,4 +1,4 @@
-import { chromium } from "@playwright/test";
+import { chromium } from "playwright";
 import axios from "axios";
 import fs from "fs/promises";
 
