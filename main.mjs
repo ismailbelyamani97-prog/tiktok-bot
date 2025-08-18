@@ -1,59 +1,92 @@
-import os
-import requests
-import datetime
+import fs from "fs";
+import fetch from "node-fetch";
+import { chromium } from "playwright";
 
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+// Load accounts
+const accounts = JSON.parse(fs.readFileSync("./accounts.json", "utf8"));
+const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK;
+const VIEW_THRESHOLD = 50;
+const TIME_LIMIT_HOURS = 48;
 
-def load_accounts(file_path="accounts.txt"):
-    with open(file_path, "r") as f:
-        accounts = [line.strip() for line in f if line.strip()]
-    return accounts
+async function scrapeAccount(browser, url) {
+  const context = await browser.newContext({
+    userAgent:
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
+  });
+  const page = await context.newPage();
 
-def fetch_views(account_url):
-    try:
-        # Simple TikTok scraping via unofficial API endpoint
-        resp = requests.get(account_url, timeout=15, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-        })
-        if resp.status_code != 200:
-            return None
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-        # NOTE: Simplified parsing – replace with proper scraping/JSON extraction
-        text = resp.text.lower()
-        views = text.count("views") * 10  # dummy fallback (replace with parser)
-        return views
-    except Exception:
-        return None
+    // scroll human-like
+    for (let i = 0; i < 3; i++) {
+      await page.mouse.wheel(0, 400);
+      await page.waitForTimeout(1500 + Math.random() * 1000);
+    }
 
-def notify_discord(message):
-    if not DISCORD_WEBHOOK_URL:
-        print("⚠️ No Discord webhook set")
-        return
-    requests.post(DISCORD_WEBHOOK_URL, json={"content": message})
+    // grab video blocks
+    const videos = await page.$$eval("a[href*='/video/']", (els) =>
+      els.map((el) => {
+        const parent = el.closest("div[data-e2e='user-post-item']") || el;
+        const viewsEl = parent.querySelector("strong");
+        return {
+          link: el.href,
+          views: viewsEl ? viewsEl.innerText : "0",
+        };
+      })
+    );
 
-def main():
-    accounts = load_accounts()
-    cutoff = datetime.datetime.utcnow() - datetime.timedelta(hours=48)
-    results = []
-    debug = []
+    return videos;
+  } catch (err) {
+    return { error: `failed to load ${url}: ${err.message}` };
+  } finally {
+    await context.close();
+  }
+}
 
-    for acc in accounts:
-        views = fetch_views(acc)
-        if views is None:
-            debug.append(f"{acc}: failed to load")
-        elif views >= 50:
-            results.append(f"{acc} → {views} views")
+function parseViews(viewStr) {
+  if (!viewStr) return 0;
+  viewStr = viewStr.toLowerCase();
+  if (viewStr.endsWith("k")) return parseFloat(viewStr) * 1000;
+  if (viewStr.endsWith("m")) return parseFloat(viewStr) * 1000000;
+  return parseInt(viewStr.replace(/\D/g, "")) || 0;
+}
 
-    message = "📢 Check Notification (last 48H, ≥ 50 views)\n"
-    if results:
-        message += "\n".join(results)
-    else:
-        message += "No posts ≥ 50 views in the last 48h.\n"
+async function sendDiscord(msg) {
+  await fetch(DISCORD_WEBHOOK, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content: msg }),
+  });
+}
 
-    if debug:
-        message += "\n\nDebug:\n" + "\n".join(debug)
+(async () => {
+  const browser = await chromium.launch({ headless: true });
+  let report = `✅ TikTok Check (last ${TIME_LIMIT_HOURS}h, ≥${VIEW_THRESHOLD} views)\n\n`;
 
-    notify_discord(message)
+  for (const url of accounts) {
+    const result = await scrapeAccount(browser, url);
 
-if __name__ == "__main__":
-    main()
+    if (result.error) {
+      report += `⚠️ ${result.error}\n`;
+      continue;
+    }
+
+    let hits = [];
+    for (const v of result) {
+      const views = parseViews(v.views);
+      if (views >= VIEW_THRESHOLD) {
+        hits.push(`${views} views → ${v.link}`);
+      }
+    }
+
+    if (hits.length > 0) {
+      report += `🔹 ${url}\n${hits.join("\n")}\n\n`;
+    } else {
+      report += `❌ ${url} → No posts ≥ ${VIEW_THRESHOLD} views\n`;
+    }
+  }
+
+  await sendDiscord(report);
+  await browser.close();
+})();
