@@ -1,35 +1,28 @@
-name: TikTok Daily Report
+name: Daily Check
 
 on:
   schedule:
-    - cron: "0 9 * * *"        # daily at 09:00 UTC (change if you want)
+    - cron: "0 */12 * * *"  # runs every 12 hours
   workflow_dispatch:
 
 jobs:
-  run:
+  run-script:
     runs-on: ubuntu-latest
-    timeout-minutes: 15        # hard cap the whole job
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          node-version: "20"
+          python-version: "3.10"
 
-      - name: Install deps
-        run: npm i playwright axios
-
-      # Install full Chrome & required libs (helps with blocking)
-      - name: Install Playwright browsers
+      - name: Install dependencies
         run: |
-          npx playwright install --with-deps chrome
-          npx playwright install-deps chrome
+          python -m pip install --upgrade pip
+          pip install requests
 
-      - name: Run scraper
+      - name: Run main script
         env:
-          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
-          DISCORD_BOT_TOKEN:  ${{ secrets.DISCORD_BOT_TOKEN }}
-          MIN_VIEWS: "50"
-          LOOKBACK_HOURS: "48"
-        run: node main.mjs
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python main.py
