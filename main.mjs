@@ -102,7 +102,7 @@ async function sendDiscord(text) {
         const videoHTML = await fetchMirror(`https://www.tiktok.com/@${handle}/video/${videoId}`);
         const { views, likes, createMs } = extractStatsFromVideoHTML(videoHTML);
 
-        if (createMs && Date.now() - createMs <= 7 * 24 * 3600 * 1000 && views >= 50000) {
+        if (createMs && Date.now() - createMs <= 7 * 24 * 3600 * 1000 && views >= 10000) {
           viralPosts.push({
             handle,
             videoId,
@@ -123,7 +123,7 @@ async function sendDiscord(text) {
 
   viralPosts.sort((a, b) => b.createMs - a.createMs);
 
-  let lines = ["**🔥 Viral posts in last 7 days (≥50k views)**", ""];
+  let lines = ["**🔥 Viral posts in last 7 days (≥10k views)**", ""];
   if (viralPosts.length) {
     viralPosts.forEach((p, i) => {
       lines.push(
