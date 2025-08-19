@@ -8,16 +8,9 @@ import fs from "fs/promises";
 const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 const BOT_TOKEN  = process.env.DISCORD_BOT_TOKEN;
 
-/* ===== RULES ===== */
-const DAYS_WINDOW = 7;               // last N days
-const MIN_VIEWS   = 1000;           // threshold (set to 1000 for testing if you want)
-const MAX_POSTS_PER_ACCOUNT = 30;    // how many recent posts per account to scan
-
 /* ===== Helpers ===== */
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const fmtNum = (x) => (x ?? 0).toLocaleString("en-US");
-const withinDays = (ms, days) => ms && (Date.now() - ms) <= days * 24 * 3600 * 1000;
-const fmtUTC = (ms) => new Date(ms).toLocaleString("en-US", { timeZone: "UTC" });
 
 async function readAccounts() {
   const raw = await fs.readFile("accounts.txt", "utf8");
@@ -55,45 +48,30 @@ function extractLDJSONVideoObject(html) {
         const t = obj?.["@type"] || obj?.type;
         if (t && /VideoObject/i.test(t)) return obj;
       }
-    } catch {
-      // keep scanning
-    }
+    } catch {/* keep scanning */}
   }
   return null;
 }
 
-/* ---- Get list of recent video IDs from a profile ---- */
-function videoIdsFromProfile(html) {
-  const ids = new Set();
-
+/* ---- Get the MOST RECENT video ID from a profile ---- */
+function latestVideoIdFromProfile(html) {
+  // Prefer SIGI ItemList order (newest first)
   const state = extractSIGI(html);
   const list = state?.ItemList?.["user-post"]?.list;
-  if (Array.isArray(list)) {
-    for (const id of list) {
-      ids.add(String(id));
-      if (ids.size >= MAX_POSTS_PER_ACCOUNT) break;
-    }
-  }
+  if (Array.isArray(list) && list.length) return String(list[0]);
 
-  if (ids.size === 0 && state?.ItemModule) {
+  // Fallback: newest by createTime in ItemModule
+  if (state?.ItemModule) {
     const items = Object.values(state.ItemModule);
-    items.sort((a, b) => Number(b.createTime) - Number(a.createTime));
-    for (const it of items) {
-      if (!it?.id) continue;
-      ids.add(String(it.id));
-      if (ids.size >= MAX_POSTS_PER_ACCOUNT) break;
+    if (items.length) {
+      items.sort((a, b) => Number(b.createTime) - Number(a.createTime));
+      if (items[0]?.id) return String(items[0].id);
     }
   }
 
-  if (ids.size === 0) {
-    const re = /\/video\/(\d{8,})/g;
-    let m;
-    while ((m = re.exec(html)) !== null) {
-      ids.add(m[1]);
-      if (ids.size >= MAX_POSTS_PER_ACCOUNT) break;
-    }
-  }
-  return [...ids];
+  // Final fallback: regex scan and take first occurrence
+  const m = html.match(/\/video\/(\d{8,})/);
+  return m ? m[1] : null;
 }
 
 /* ---- Abbrev number parser (e.g., "2.1K", "3.4M") ---- */
@@ -109,7 +87,7 @@ function parseAbbrev(str) {
   return Math.round(num);
 }
 
-/* ---- Extract stats from video page ---- */
+/* ---- Extract views + likes from a video page ---- */
 function statsFromVideoHTML(html) {
   // 1) SIGI_STATE
   const sigi = extractSIGI(html);
@@ -120,7 +98,6 @@ function statsFromVideoHTML(html) {
       return {
         views: Number(it?.stats?.playCount || 0),
         likes: Number(it?.stats?.diggCount || 0),
-        createMs: Number(it?.createTime || 0) * 1000
       };
     }
   }
@@ -128,12 +105,7 @@ function statsFromVideoHTML(html) {
   // 2) LD+JSON VideoObject
   const ld = extractLDJSONVideoObject(html);
   if (ld) {
-    // date via uploadDate / datePublished / dateCreated
-    const dateStr = ld.uploadDate || ld.datePublished || ld.dateCreated || "";
-    const t = Date.parse(dateStr);
-    const createMs = Number.isNaN(t) ? 0 : t;
-
-    // views via WatchAction
+    // Views via WatchAction
     let views = 0;
     if (Array.isArray(ld.interactionStatistic)) {
       for (const s of ld.interactionStatistic) {
@@ -144,16 +116,16 @@ function statsFromVideoHTML(html) {
         }
       }
     }
-    // likes sometimes appear as aggregateRating.ratingCount
+    // Likes sometimes as aggregateRating.ratingCount
     let likes = 0;
     if (ld.aggregateRating && typeof ld.aggregateRating.ratingCount !== "undefined") {
       likes = Number(ld.aggregateRating.ratingCount || 0);
     }
-    return { views, likes, createMs };
+    return { views, likes };
   }
 
-  // 3) Regex fallbacks (views, likes, createTime)
-  let views = 0, likes = 0, createMs = 0;
+  // 3) Regex fallbacks
+  let views = 0, likes = 0;
 
   let m = html.match(/"playCount"\s*:\s*"?([\d,.KMB]+)"?/i);
   if (m) views = parseAbbrev(m[1]);
@@ -161,26 +133,12 @@ function statsFromVideoHTML(html) {
   m = html.match(/"diggCount"\s*:\s*"?([\d,.KMB]+)"?/i);
   if (m) likes = parseAbbrev(m[1]);
 
-  // unix seconds
-  m = html.match(/"createTime"\s*:\s*"?(\d+)"?/i);
-  if (m) createMs = Number(m[1]) * 1000;
-
-  // ISO strings
-  if (!createMs) {
-    m = html.match(/"(?:uploadDate|datePublished|dateCreated)"\s*:\s*"?([0-9T:\-+.Z]+)"?/i);
-    if (m) {
-      const tt = Date.parse(m[1]);
-      if (!Number.isNaN(tt)) createMs = tt;
-    }
-  }
-
-  // extremely last resort: look for "views": 12345
   if (!views) {
     m = html.match(/"views"\s*:\s*"?([\d,.KMB]+)"?/i);
     if (m) views = parseAbbrev(m[1]);
   }
 
-  return { views, likes, createMs };
+  return { views, likes };
 }
 
 /* ---- Send message(s) to Discord ---- */
@@ -196,7 +154,7 @@ async function sendDiscord(text) {
       body: JSON.stringify({ content: c })
     });
     if (!res.ok) await res.text().catch(()=>{});
-    await sleep(500);
+    await sleep(400);
   }
 }
 
@@ -208,61 +166,43 @@ async function sendDiscord(text) {
   }
 
   const handles = await readAccounts();
-  let viral = [];
+  let rows = [];
 
   for (const handle of handles) {
     try {
+      // 1) profile → latest video id
       const profileHTML = await fetchMirror(`https://www.tiktok.com/@${handle}`);
-      const ids = videoIdsFromProfile(profileHTML);
-
-      for (const id of ids) {
-        // try two URL forms through mirror (some pages differ)
-        const htmlA = await fetchMirror(`https://www.tiktok.com/@${handle}/video/${id}`);
-        const statsA = statsFromVideoHTML(htmlA);
-
-        let views = statsA.views, likes = statsA.likes, createMs = statsA.createMs;
-
-        if ((!views || !createMs)) {
-          const htmlB = await fetchMirror(`https://www.tiktok.com/@${handle}/video/${id}?lang=en`);
-          const statsB = statsFromVideoHTML(htmlB);
-          views = views || statsB.views;
-          likes = likes || statsB.likes;
-          createMs = createMs || statsB.createMs;
-        }
-
-        if (withinDays(createMs, DAYS_WINDOW) && views >= MIN_VIEWS) {
-          viral.push({
-            handle,
-            id,
-            url: `https://www.tiktok.com/@${handle}/video/${id}`,
-            accountUrl: `https://www.tiktok.com/@${handle}`,
-            views,
-            likes,
-            createMs
-          });
-        }
-
-        await sleep(600 + Math.random() * 400);
+      const videoId = latestVideoIdFromProfile(profileHTML);
+      if (!videoId) {
+        rows.push(`• @${handle} — (no recent post found)`);
+        continue;
       }
+
+      // 2) video page → stats
+      // try two variants; some mirrors expose different blocks
+      let html = await fetchMirror(`https://www.tiktok.com/@${handle}/video/${videoId}`);
+      let { views, likes } = statsFromVideoHTML(html);
+
+      if (!views && !likes) {
+        html = await fetchMirror(`https://www.tiktok.com/@${handle}/video/${videoId}?lang=en`);
+        const alt = statsFromVideoHTML(html);
+        views = views || alt.views;
+        likes = likes || alt.likes;
+      }
+
+      rows.push(
+        `• [@${handle}](https://www.tiktok.com/@${handle}) — ` +
+        `**${fmtNum(views)} views**, ❤️ ${fmtNum(likes)} — ` +
+        `[Post link](https://www.tiktok.com/@${handle}/video/${videoId})`
+      );
+
+      await sleep(600 + Math.random() * 400);
     } catch {
-      // skip silently
+      rows.push(`• @${handle} — (could not read)`);
     }
   }
 
-  // Sort by posted date (newest first)
-  viral.sort((a, b) => b.createMs - a.createMs);
-
-  let lines = [`**🔥 Viral posts in last ${DAYS_WINDOW} days (≥${fmtNum(MIN_VIEWS)} views)**`, ""];
-  if (viral.length) {
-    viral.forEach((p, i) => {
-      lines.push(
-        `${i + 1}. [Post Link](${p.url}) | [@${p.handle}](${p.accountUrl}) — **${fmtNum(p.views)} views**, ❤️ ${fmtNum(p.likes)}, 📅 ${fmtUTC(p.createMs)}`
-      );
-    });
-  } else {
-    lines.push(`No viral posts found in last ${DAYS_WINDOW} days.`);
-  }
-
-  await sendDiscord(lines.join("\n"));
+  const header = "**Latest post per account — views & likes**\n";
+  await sendDiscord(header + rows.join("\n"));
   console.log("✅ Done");
 })();
