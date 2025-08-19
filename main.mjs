@@ -11,7 +11,7 @@ const BOT_TOKEN  = process.env.DISCORD_BOT_TOKEN;
 /* ===== RULES ===== */
 const DAYS_WINDOW = 7;               // last N days
 const MIN_VIEWS   = 1000;           // threshold (e.g., 50000)
-const MAX_POSTS_PER_ACCOUNT = 30;    // how many recent posts per account to scan
+const MAX_POSTS_PER_ACCOUNT = 15;    // how many recent posts per account to scan
 
 /* ===== Helpers ===== */
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
