@@ -10,7 +10,7 @@ const BOT_TOKEN  = process.env.DISCORD_BOT_TOKEN;
 
 /* ===== RULES ===== */
 const DAYS_WINDOW = 7;               // last N days
-const MIN_VIEWS   = 50000;           // threshold (set to 1000 for testing if you want)
+const MIN_VIEWS   = 1000;           // threshold (set to 1000 for testing if you want)
 const MAX_POSTS_PER_ACCOUNT = 30;    // how many recent posts per account to scan
 
 /* ===== Helpers ===== */
