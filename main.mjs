@@ -1,61 +1,87 @@
-import fs from "fs";
-import fetch from "node-fetch";
-import { Client, GatewayIntentBits } from "discord.js";
+// main.mjs
+import fs from "fs/promises";
 
-// Read TikTok accounts from accounts.txt
-const accounts = fs.readFileSync("accounts.txt", "utf-8")
-  .split("\n")
-  .map(line => line.trim())
-  .filter(Boolean);
+/* Discord credentials */
+const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
+const BOT_TOKEN  = process.env.DISCORD_BOT_TOKEN;
 
-// Discord setup
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const CHANNEL_ID = process.env.CHANNEL_ID;
+const HEADERS = {
+  "user-agent":
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  "accept-language": "en-US,en;q=0.9",
+  "referer": "https://www.tiktok.com/"
+};
 
-// Helper to extract last video link
-async function getLastPostLink(username) {
-  try {
-    const res = await fetch(`https://www.tiktok.com/@${username}`);
-    const html = await res.text();
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    // Extract JSON data inside <script id="SIGI_STATE">
-    const match = html.match(/<script id="SIGI_STATE" type="application\/json">(.*?)<\/script>/);
-    if (!match) return null;
+async function readAccounts() {
+  const raw = await fs.readFile("accounts.txt", "utf8");
+  return raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean).map(s => s.replace(/^@+/, ""));
+}
 
-    const data = JSON.parse(match[1]);
+async function fetchProfileHTML(handle) {
+  const url = `https://www.tiktok.com/@${handle}?lang=en`;
+  const res = await fetch(url, { headers: HEADERS, redirect: "follow" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.text();
+}
 
-    // Navigate JSON to get last post
-    const videos = data.ItemList?.["user-post"]?.list || [];
-    if (!videos.length) return null;
+function extractSIGI(html) {
+  const m = html.match(/<script id="SIGI_STATE"[^>]*>([\s\S]*?)<\/script>/);
+  if (!m) throw new Error("SIGI_STATE not found");
+  return JSON.parse(m[1]);
+}
 
-    const lastVideoId = videos[0]; // first = latest
-    return `https://www.tiktok.com/@${username}/video/${lastVideoId}`;
-  } catch (err) {
-    console.error(`Error fetching ${username}:`, err.message);
-    return null;
+function getFollowerCount(state, handle) {
+  const u = state?.UserModule?.users?.[handle];
+  return u?.stats?.followerCount ?? null;
+}
+
+async function sendDiscord(text) {
+  const res = await fetch(`https://discord.com/api/v10/channels/${CHANNEL_ID}/messages`, {
+    method: "POST",
+    headers: {
+      authorization: `Bot ${BOT_TOKEN}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ content: text })
+  });
+  if (!res.ok) {
+    console.error("Discord error", res.status, await res.text());
   }
 }
 
-client.once("ready", async () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
+(async () => {
+  if (!CHANNEL_ID || !BOT_TOKEN) {
+    console.error("❌ Missing DISCORD_CHANNEL_ID or DISCORD_BOT_TOKEN");
+    process.exit(1);
+  }
 
-  let messages = ["**Latest TikTok Posts**\n"];
+  const handles = await readAccounts();
+  let results = [];
 
-  for (const account of accounts) {
-    const link = await getLastPostLink(account);
-    if (link) {
-      messages.push(`🔗 [${account}](${link})`);
-    } else {
-      messages.push(`⚠️ Could not fetch last post for **${account}**`);
+  for (const h of handles) {
+    try {
+      const html = await fetchProfileHTML(h);
+      const state = extractSIGI(html);
+      const followers = getFollowerCount(state, h);
+      if (followers && followers > 20000) {
+        results.push({ handle: h, followers });
+      }
+      await sleep(500); // politeness
+    } catch (e) {
+      console.error(`@${h} failed:`, e.message);
     }
   }
 
-  const channel = await client.channels.fetch(CHANNEL_ID);
-  await channel.send(messages.join("\n"));
+  results.sort((a, b) => b.followers - a.followers);
 
-  console.log("✅ Sent latest posts to Discord.");
-  process.exit(0);
-});
+  let out = ["**Accounts with >20k followers**", ""];
+  results.forEach((r, i) => {
+    out.push(`${i+1}. [@${r.handle}](https://www.tiktok.com/@${r.handle}) — **${r.followers.toLocaleString()} followers**`);
+  });
+  if (results.length === 0) out.push("_No accounts matched_");
 
-client.login(DISCORD_TOKEN);
+  await sendDiscord(out.join("\n"));
+  console.log("✅ Done");
+})();
