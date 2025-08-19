@@ -10,8 +10,8 @@ const BOT_TOKEN  = process.env.DISCORD_BOT_TOKEN;
 
 /* ===== RULES ===== */
 const DAYS_WINDOW = 7;               // last N days
-const MIN_VIEWS   = 1000;           // threshold (e.g., 50000)
-const MAX_POSTS_PER_ACCOUNT = 15;    // how many recent posts per account to scan
+const MIN_VIEWS   = 50000;           // threshold (set to 1000 for testing if you want)
+const MAX_POSTS_PER_ACCOUNT = 30;    // how many recent posts per account to scan
 
 /* ===== Helpers ===== */
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -24,7 +24,7 @@ async function readAccounts() {
   return raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean).map(s => s.replace(/^@+/, ""));
 }
 
-/* ---- Fetch HTML through jina.ai mirror (avoids consent/JS) ---- */
+/* ---- Fetch HTML via jina.ai mirror (avoids consent/JS) ---- */
 async function fetchMirror(url) {
   const proxied = `https://r.jina.ai/http://${url.replace(/^https?:\/\//, "")}`;
   const res = await fetch(proxied, {
@@ -38,27 +38,26 @@ async function fetchMirror(url) {
   return res.text();
 }
 
-/* ---- Extract inline JSON blocks ---- */
+/* ---- JSON extractors ---- */
 function extractSIGI(html) {
   const m = html.match(/<script id="SIGI_STATE"[^>]*>([\s\S]*?)<\/script>/);
   if (!m) return null;
   try { return JSON.parse(m[1]); } catch { return null; }
 }
 
-function extractLDJSON(html) {
-  // May appear multiple times; pick the one with "@type":"VideoObject"
+function extractLDJSONVideoObject(html) {
   const blocks = [...html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)];
   for (const b of blocks) {
     try {
       const j = JSON.parse(b[1]);
-      // Sometimes it’s an array, sometimes a single object
       const arr = Array.isArray(j) ? j : [j];
       for (const obj of arr) {
-        if (obj && (obj["@type"] === "VideoObject" || obj.type === "VideoObject")) {
-          return obj; // Return the first VideoObject block
-        }
+        const t = obj?.["@type"] || obj?.type;
+        if (t && /VideoObject/i.test(t)) return obj;
       }
-    } catch { /* keep looking */ }
+    } catch {
+      // keep scanning
+    }
   }
   return null;
 }
@@ -67,7 +66,6 @@ function extractLDJSON(html) {
 function videoIdsFromProfile(html) {
   const ids = new Set();
 
-  // Preferred: SIGI ItemList
   const state = extractSIGI(html);
   const list = state?.ItemList?.["user-post"]?.list;
   if (Array.isArray(list)) {
@@ -77,7 +75,6 @@ function videoIdsFromProfile(html) {
     }
   }
 
-  // Fallback: ItemModule (sort by createTime)
   if (ids.size === 0 && state?.ItemModule) {
     const items = Object.values(state.ItemModule);
     items.sort((a, b) => Number(b.createTime) - Number(a.createTime));
@@ -88,7 +85,6 @@ function videoIdsFromProfile(html) {
     }
   }
 
-  // Final fallback: regex scan
   if (ids.size === 0) {
     const re = /\/video\/(\d{8,})/g;
     let m;
@@ -100,9 +96,22 @@ function videoIdsFromProfile(html) {
   return [...ids];
 }
 
-/* ---- Extract stats from a video page ---- */
+/* ---- Abbrev number parser (e.g., "2.1K", "3.4M") ---- */
+function parseAbbrev(str) {
+  if (!str) return 0;
+  const m = String(str).trim().match(/^([\d,.]+)\s*([KMB])?$/i);
+  if (!m) return Number(str) || 0;
+  let num = Number(m[1].replace(/,/g, ""));
+  const suf = (m[2] || "").toUpperCase();
+  if (suf === "K") num *= 1e3;
+  if (suf === "M") num *= 1e6;
+  if (suf === "B") num *= 1e9;
+  return Math.round(num);
+}
+
+/* ---- Extract stats from video page ---- */
 function statsFromVideoHTML(html) {
-  // 1) SIGI (most reliable)
+  // 1) SIGI_STATE
   const sigi = extractSIGI(html);
   if (sigi?.ItemModule) {
     const items = Object.values(sigi.ItemModule);
@@ -116,27 +125,26 @@ function statsFromVideoHTML(html) {
     }
   }
 
-  // 2) LD+JSON (VideoObject)
-  const ld = extractLDJSON(html);
+  // 2) LD+JSON VideoObject
+  const ld = extractLDJSONVideoObject(html);
   if (ld) {
-    // Common fields in TikTok LD JSON:
-    // ld.uploadDate (ISO), ld.interactionStatistic[].userInteractionCount (views), ld.aggregateRating?.ratingCount (likes sometimes)
-    let createMs = 0;
-    if (ld.uploadDate) {
-      const t = Date.parse(ld.uploadDate);
-      if (!Number.isNaN(t)) createMs = t;
-    }
+    // date via uploadDate / datePublished / dateCreated
+    const dateStr = ld.uploadDate || ld.datePublished || ld.dateCreated || "";
+    const t = Date.parse(dateStr);
+    const createMs = Number.isNaN(t) ? 0 : t;
+
+    // views via WatchAction
     let views = 0;
     if (Array.isArray(ld.interactionStatistic)) {
       for (const s of ld.interactionStatistic) {
         const typ = s?.interactionType?.["@type"] || s?.interactionType;
         if (typ && /WatchAction/i.test(typ)) {
-          const cnt = Number(s?.userInteractionCount || 0);
-          if (cnt) views = cnt;
+          views = Number(s?.userInteractionCount || 0);
+          break;
         }
       }
     }
-    // likes sometimes present as "aggregateRating": {"ratingCount": ...}
+    // likes sometimes appear as aggregateRating.ratingCount
     let likes = 0;
     if (ld.aggregateRating && typeof ld.aggregateRating.ratingCount !== "undefined") {
       likes = Number(ld.aggregateRating.ratingCount || 0);
@@ -144,26 +152,32 @@ function statsFromVideoHTML(html) {
     return { views, likes, createMs };
   }
 
-  // 3) Regex fallbacks
+  // 3) Regex fallbacks (views, likes, createTime)
   let views = 0, likes = 0, createMs = 0;
 
-  let m = html.match(/"playCount"\s*:\s*"?(\d+)"?/);
-  if (m) views = Number(m[1]);
+  let m = html.match(/"playCount"\s*:\s*"?([\d,.KMB]+)"?/i);
+  if (m) views = parseAbbrev(m[1]);
 
-  m = html.match(/"diggCount"\s*:\s*"?(\d+)"?/);
-  if (m) likes = Number(m[1]);
+  m = html.match(/"diggCount"\s*:\s*"?([\d,.KMB]+)"?/i);
+  if (m) likes = parseAbbrev(m[1]);
 
-  // createTime (unix seconds)
-  m = html.match(/"createTime"\s*:\s*"?(\d+)"?/);
+  // unix seconds
+  m = html.match(/"createTime"\s*:\s*"?(\d+)"?/i);
   if (m) createMs = Number(m[1]) * 1000;
 
-  // try ISO date (uploadDate)
+  // ISO strings
   if (!createMs) {
-    m = html.match(/"uploadDate"\s*:\s*"?([0-9T:\-+.Z]+)"?/);
+    m = html.match(/"(?:uploadDate|datePublished|dateCreated)"\s*:\s*"?([0-9T:\-+.Z]+)"?/i);
     if (m) {
-      const t = Date.parse(m[1]);
-      if (!Number.isNaN(t)) createMs = t;
+      const tt = Date.parse(m[1]);
+      if (!Number.isNaN(tt)) createMs = tt;
     }
+  }
+
+  // extremely last resort: look for "views": 12345
+  if (!views) {
+    m = html.match(/"views"\s*:\s*"?([\d,.KMB]+)"?/i);
+    if (m) views = parseAbbrev(m[1]);
   }
 
   return { views, likes, createMs };
@@ -202,8 +216,19 @@ async function sendDiscord(text) {
       const ids = videoIdsFromProfile(profileHTML);
 
       for (const id of ids) {
-        const videoHTML = await fetchMirror(`https://www.tiktok.com/@${handle}/video/${id}`);
-        const { views, likes, createMs } = statsFromVideoHTML(videoHTML);
+        // try two URL forms through mirror (some pages differ)
+        const htmlA = await fetchMirror(`https://www.tiktok.com/@${handle}/video/${id}`);
+        const statsA = statsFromVideoHTML(htmlA);
+
+        let views = statsA.views, likes = statsA.likes, createMs = statsA.createMs;
+
+        if ((!views || !createMs)) {
+          const htmlB = await fetchMirror(`https://www.tiktok.com/@${handle}/video/${id}?lang=en`);
+          const statsB = statsFromVideoHTML(htmlB);
+          views = views || statsB.views;
+          likes = likes || statsB.likes;
+          createMs = createMs || statsB.createMs;
+        }
 
         if (withinDays(createMs, DAYS_WINDOW) && views >= MIN_VIEWS) {
           viral.push({
