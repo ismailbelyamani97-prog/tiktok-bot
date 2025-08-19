@@ -1,7 +1,7 @@
 // main.mjs
 import fs from "fs/promises";
 
-/* Discord credentials */
+/* Discord credentials (from repo secrets) */
 const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 const BOT_TOKEN  = process.env.DISCORD_BOT_TOKEN;
 
@@ -13,6 +13,7 @@ const HEADERS = {
 };
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const n = (x) => (x || 0).toLocaleString("en-US");
 
 async function readAccounts() {
   const raw = await fs.readFile("accounts.txt", "utf8");
@@ -27,60 +28,94 @@ async function fetchProfileHTML(handle) {
 }
 
 function extractSIGI(html) {
-  const m = html.match(/<script id="SIGI_STATE"[^>]*>([\s\S]*?)<\/script>/);
+  let m = html.match(/<script id="SIGI_STATE"[^>]*>([\s\S]*?)<\/script>/);
   if (!m) throw new Error("SIGI_STATE not found");
   return JSON.parse(m[1]);
 }
 
+/* ---- FIXED: follower count lives in UserModule.stats[uniqueId].followerCount ---- */
 function getFollowerCount(state, handle) {
-  const u = state?.UserModule?.users?.[handle];
-  return u?.stats?.followerCount ?? null;
+  const users = state?.UserModule?.users || {};
+  const stats = state?.UserModule?.stats || {};
+
+  // direct lookup by uniqueId/handle
+  if (stats[handle]?.followerCount != null) return Number(stats[handle].followerCount);
+
+  // sometimes keys are case-variant or mapped; try to find the user by uniqueId in 'users' and then map to stats
+  const userEntry = users[handle] || Object.values(users).find(u => (u?.uniqueId || "").toLowerCase() === handle.toLowerCase());
+  if (userEntry && stats[userEntry.uniqueId]?.followerCount != null) {
+    return Number(stats[userEntry.uniqueId].followerCount);
+  }
+
+  // last resort: scan all stats entries and match to a users entry with same key -> uniqueId
+  for (const [key, st] of Object.entries(stats)) {
+    const u = users[key];
+    if ((u?.uniqueId || "").toLowerCase() === handle.toLowerCase() && st?.followerCount != null) {
+      return Number(st.followerCount);
+    }
+  }
+
+  return null; // not found
 }
 
 async function sendDiscord(text) {
-  const res = await fetch(`https://discord.com/api/v10/channels/${CHANNEL_ID}/messages`, {
-    method: "POST",
-    headers: {
-      authorization: `Bot ${BOT_TOKEN}`,
-      "content-type": "application/json"
-    },
-    body: JSON.stringify({ content: text })
-  });
-  if (!res.ok) {
-    console.error("Discord error", res.status, await res.text());
+  const chunks = text.match(/[\s\S]{1,1800}/g) || [];
+  for (const c of chunks) {
+    const res = await fetch(`https://discord.com/api/v10/channels/${CHANNEL_ID}/messages`, {
+      method: "POST",
+      headers: {
+        authorization: `Bot ${BOT_TOKEN}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ content: c })
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(()=> "");
+      console.error("Discord post failed:", res.status, t);
+    }
   }
 }
 
 (async () => {
   if (!CHANNEL_ID || !BOT_TOKEN) {
-    console.error("❌ Missing DISCORD_CHANNEL_ID or DISCORD_BOT_TOKEN");
+    console.error("❌ Missing DISCORD_CHANNEL_ID or DISCORD_BOT_TOKEN.");
     process.exit(1);
   }
 
   const handles = await readAccounts();
   let results = [];
+  let debug = [];
 
   for (const h of handles) {
     try {
       const html = await fetchProfileHTML(h);
       const state = extractSIGI(html);
       const followers = getFollowerCount(state, h);
-      if (followers && followers > 20000) {
+      if (followers != null && followers > 20000) {
         results.push({ handle: h, followers });
+      } else {
+        debug.push(`@${h}: followerCount not found or ≤ 20k`);
       }
-      await sleep(500); // politeness
+      await sleep(400 + Math.random()*400); // polite delay
     } catch (e) {
-      console.error(`@${h} failed:`, e.message);
+      debug.push(`@${h}: ${e.message}`);
     }
   }
 
-  results.sort((a, b) => b.followers - a.followers);
+  results.sort((a,b) => b.followers - a.followers);
 
   let out = ["**Accounts with >20k followers**", ""];
-  results.forEach((r, i) => {
-    out.push(`${i+1}. [@${r.handle}](https://www.tiktok.com/@${r.handle}) — **${r.followers.toLocaleString()} followers**`);
-  });
-  if (results.length === 0) out.push("_No accounts matched_");
+  if (results.length) {
+    results.forEach((r,i)=>{
+      out.push(`${i+1}. [@${r.handle}](https://www.tiktok.com/@${r.handle}) — **${n(r.followers)} followers**`);
+    });
+  } else {
+    out.push("_No accounts matched_");
+  }
+
+  if (debug.length) {
+    out.push("", "_Debug:_", ...debug);
+  }
 
   await sendDiscord(out.join("\n"));
   console.log("✅ Done");
