@@ -4,25 +4,26 @@ import fs from "fs/promises";
 /* ===== GitHub Secrets =====
    DISCORD_BOT_TOKEN
    DISCORD_CHANNEL_ID
-=========================== */
+=========================================== */
 const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 const BOT_TOKEN  = process.env.DISCORD_BOT_TOKEN;
 
-const n = (x) => (x ?? 0).toLocaleString("en-US");
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const daysAgo = (ms) => (ms ? Math.floor((Date.now() - ms) / (1000 * 60 * 60 * 24)) : null);
+const fmtNum = (x) => (x ?? 0).toLocaleString("en-US");
 
+/* ---- Read accounts.txt ---- */
 async function readAccounts() {
   const raw = await fs.readFile("accounts.txt", "utf8");
   return raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean).map(s => s.replace(/^@+/, ""));
 }
 
-/* --- mirror fetch (returns raw HTML, avoids consent walls) --- */
+/* ---- Fetch HTML via jina.ai mirror ---- */
 async function fetchMirror(url) {
   const proxied = `https://r.jina.ai/http://${url.replace(/^https?:\/\//, "")}`;
   const res = await fetch(proxied, {
     headers: {
-      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
       "accept-language": "en-US,en;q=0.9"
     }
   });
@@ -30,36 +31,39 @@ async function fetchMirror(url) {
   return res.text();
 }
 
-/* --- pull video ids from profile HTML --- */
+/* ---- Extract video IDs from profile HTML ---- */
 function extractVideoIdsFromProfileHTML(html) {
   const ids = new Set();
   const re = /\/video\/(\d{8,})/g;
   let m;
   while ((m = re.exec(html)) !== null) {
     ids.add(m[1]);
-    if (ids.size >= 12) break;
+    if (ids.size >= 20) break; // take first 20 posts for safety
   }
   return [...ids];
 }
 
-/* --- get views + createTime from video HTML --- */
+/* ---- Extract stats (views, likes, createTime) from video HTML ---- */
 function extractStatsFromVideoHTML(html) {
-  let views = 0, createMs = 0;
+  let views = 0, likes = 0, createMs = 0;
 
   let m = html.match(/"playCount"\s*:\s*"?(\d+)"?/);
   if (m) views = Number(m[1]);
 
+  m = html.match(/"diggCount"\s*:\s*"?(\d+)"?/);
+  if (m) likes = Number(m[1]);
+
   m = html.match(/"createTime"\s*:\s*"?(\d+)"?/);
   if (m) createMs = Number(m[1]) * 1000;
 
-  if (!views) {
-    m = html.match(/"views"\s*:\s*"?(\d+)"?/);
-    if (m) views = Number(m[1]);
-  }
-  return { views, createMs };
+  return { views, likes, createMs };
 }
 
-/* --- send to Discord --- */
+function formatDate(ms) {
+  return new Date(ms).toLocaleString("en-US", { timeZone: "UTC" });
+}
+
+/* ---- Send message(s) to Discord ---- */
 async function sendDiscord(text) {
   const chunks = text.match(/[\s\S]{1,1800}/g) || [];
   for (const c of chunks) {
@@ -72,9 +76,10 @@ async function sendDiscord(text) {
       body: JSON.stringify({ content: c })
     });
     if (!res.ok) {
-      await res.text().catch(()=>{});
+      const t = await res.text().catch(() => "");
+      console.error("Discord post failed:", res.status, t);
     }
-    await sleep(400);
+    await sleep(600);
   }
 }
 
@@ -86,42 +91,47 @@ async function sendDiscord(text) {
   }
 
   const handles = await readAccounts();
-  let latest = [];
+  let viralPosts = [];
 
   for (const handle of handles) {
     try {
       const profileHTML = await fetchMirror(`https://www.tiktok.com/@${handle}`);
       const ids = extractVideoIdsFromProfileHTML(profileHTML);
-      if (!ids.length) continue;
 
-      const videoId = ids[0];
-      const videoHTML = await fetchMirror(`https://www.tiktok.com/@${handle}/video/${videoId}`);
-      const { views, createMs } = extractStatsFromVideoHTML(videoHTML);
+      for (const videoId of ids) {
+        const videoHTML = await fetchMirror(`https://www.tiktok.com/@${handle}/video/${videoId}`);
+        const { views, likes, createMs } = extractStatsFromVideoHTML(videoHTML);
 
-      latest.push({
-        handle,
-        url: `https://www.tiktok.com/@${handle}/video/${videoId}`,
-        views,
-        createMs
-      });
+        if (createMs && Date.now() - createMs <= 7 * 24 * 3600 * 1000 && views >= 50000) {
+          viralPosts.push({
+            handle,
+            videoId,
+            url: `https://www.tiktok.com/@${handle}/video/${videoId}`,
+            accountUrl: `https://www.tiktok.com/@${handle}`,
+            views,
+            likes,
+            createMs
+          });
+        }
 
-      await sleep(600 + Math.random() * 400);
-    } catch {
-      // quietly skip failed accounts (no debug output)
+        await sleep(600 + Math.random() * 400);
+      }
+    } catch (e) {
+      console.error(`@${handle}: ${e.message}`);
     }
   }
 
-  // sort by views (desc)
-  latest.sort((a, b) => (b.views || 0) - (a.views || 0));
+  viralPosts.sort((a, b) => b.createMs - a.createMs);
 
-  let lines = ["**Latest post per account — sorted by views**", ""];
-  if (latest.length) {
-    latest.forEach((p, i) => {
-      const when = p.createMs ? ` — posted ${daysAgo(p.createMs)} day(s) ago` : "";
-      lines.push(`${i + 1}. [Post Link](${p.url}) | @${p.handle} — **${n(p.views)} views**${when}`);
+  let lines = ["**🔥 Viral posts in last 7 days (≥50k views)**", ""];
+  if (viralPosts.length) {
+    viralPosts.forEach((p, i) => {
+      lines.push(
+        `${i + 1}. [Post Link](${p.url}) | [@${p.handle}](${p.accountUrl}) — **${fmtNum(p.views)} views**, ❤️ ${fmtNum(p.likes)}, 📅 ${formatDate(p.createMs)}`
+      );
     });
   } else {
-    lines.push("No posts could be read.");
+    lines.push("No viral posts found in last 7 days.");
   }
 
   await sendDiscord(lines.join("\n"));
