@@ -1,16 +1,21 @@
-name: TikTok Followers Bot
+name: TikTok Latest Post Bot
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 */8 * * *"   # every 8 hours; change as you like
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: "20"
+
       - name: Run bot
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
