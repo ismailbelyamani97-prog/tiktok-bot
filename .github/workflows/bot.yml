@@ -1,4 +1,4 @@
-name: TikTok Latest Post Bot
+name: TikTok Viral Posts Bot
 
 on:
   workflow_dispatch:
