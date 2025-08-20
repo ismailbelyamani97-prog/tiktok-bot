@@ -1,52 +1,54 @@
-// main.mjs — GitHub Actions friendly, NO headless browser
-// Reads views & likes reliably (video + slideshow) using a read-only mirror.
-// Expects repo secrets: DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID
-// Uses accounts.txt (one handle per line, without @)
+// main.mjs — viral posts (last 7 days) with green bar + no embeds
+// Secrets needed: DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID
+// Input file: accounts.txt (one handle per line, no "@")
 
 import fs from "fs/promises";
 
 const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 const BOT_TOKEN  = process.env.DISCORD_BOT_TOKEN;
 
-const MAX_IDS_PER_PROFILE = 12;   // how many recent post IDs to scan (we use the newest only here)
-const PROFILE_VARIANTS = [
-  (h) => `https://www.tiktok.com/@${h}`,
-  (h) => `https://www.tiktok.com/@${h}?lang=en`,
-  (h) => `https://m.tiktok.com/@${h}`,
-  (h) => `https://us.tiktok.com/@${h}`,
-];
-const VIDEO_VARIANTS = [
-  (h, id) => `https://www.tiktok.com/@${h}/video/${id}`,
-  (h, id) => `https://www.tiktok.com/@${h}/video/${id}?lang=en`,
-];
+// === Rules you can tweak ===
+const DAYS_WINDOW = 7;          // last N days
+const MIN_VIEWS   = 50000;      // threshold
+const MAX_IDS_PER_PROFILE = 20; // how many recent ids to scan per account
 
+// ---- helpers
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const n = (x) => (x ?? 0).toLocaleString("en-US");
+const ago = (now, tMs) => {
+  if (!tMs) return "";
+  const s = Math.floor((now - tMs) / 1000);
+  const d = Math.floor(s / 86400); if (d) return `${d} day(s) ago`;
+  const h = Math.floor((s % 86400) / 3600); if (h) return `${h} hour(s) ago`;
+  const m = Math.floor((s % 3600) / 60); if (m) return `${m} min(s) ago`;
+  return "just now";
+};
 
-/* ---------- basic IO ---------- */
 async function readHandles() {
   const raw = await fs.readFile("accounts.txt", "utf8");
   return raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean).map(s => s.replace(/^@+/, ""));
 }
 
 async function sendDiscord(text) {
-  if (!CHANNEL_ID || !BOT_TOKEN) {
-    console.error("Missing DISCORD_CHANNEL_ID or DISCORD_BOT_TOKEN");
-    return;
-  }
-  const parts = text.match(/[\s\S]{1,1800}/g) || [];
-  for (const p of parts) {
+  // flags: 4 => SUPPRESS_EMBEDS (no huge previews)
+  // leading ">>>" makes the whole message a multi-line blockquote (green bar)
+  const content = `>>> ${text}`;
+  const chunks = content.match(/[\s\S]{1,1800}/g) || [];
+  for (const c of chunks) {
     await fetch(`https://discord.com/api/v10/channels/${CHANNEL_ID}/messages`, {
       method: "POST",
-      headers: { authorization: `Bot ${BOT_TOKEN}`, "content-type": "application/json" },
-      body: JSON.stringify({ content: p })
+      headers: {
+        authorization: `Bot ${BOT_TOKEN}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ content: c, flags: 4 })
     });
     await sleep(250);
   }
 }
 
-/* ---------- mirror fetch (bypasses JS/consent walls) ---------- */
 async function fetchMirror(url) {
+  // read-only HTML mirror to avoid consent/JS
   const proxied = `https://r.jina.ai/http://${url.replace(/^https?:\/\//, "")}`;
   const res = await fetch(proxied, {
     headers: {
@@ -59,18 +61,16 @@ async function fetchMirror(url) {
   return res.text();
 }
 
-/* ---------- parsers ---------- */
 function parseSIGI(html) {
   const m = html.match(/<script id="SIGI_STATE"[^>]*>([\s\S]*?)<\/script>/);
   if (!m) return null;
   try { return JSON.parse(m[1]); } catch { return null; }
 }
 
-/** collect recent post IDs from a profile page HTML */
 function recentIdsFromProfileHTML(html, max = MAX_IDS_PER_PROFILE) {
   const ids = new Set();
 
-  // 1) SIGI list (best)
+  // best: SIGI ItemList
   const sigi = parseSIGI(html);
   const list = sigi?.ItemList?.["user-post"]?.list;
   if (Array.isArray(list)) {
@@ -80,17 +80,15 @@ function recentIdsFromProfileHTML(html, max = MAX_IDS_PER_PROFILE) {
     }
   }
 
-  // 2) Fallback: any /video/<id> link in the HTML
+  // fallback: scan links
   if (ids.size < max) {
     const re = /\/video\/(\d{8,})/g;
     let m;
     while (ids.size < max && (m = re.exec(html))) ids.add(m[1]);
   }
-
   return [...ids];
 }
 
-/** normalize abbreviated numbers like 3.4K, 2M */
 function parseAbbrev(str) {
   if (!str) return 0;
   const m = String(str).trim().match(/^([\d.,]+)\s*([KMB])?$/i);
@@ -103,32 +101,34 @@ function parseAbbrev(str) {
   return Math.round(num);
 }
 
-/** get views/likes/createTime from a video (or slideshow) HTML */
 function statsFromVideoHTML(html) {
-  // 1) SIGI (best and most reliable)
+  // 1) SIGI (most reliable)
   const sigi = parseSIGI(html);
   if (sigi?.ItemModule) {
     const it = Object.values(sigi.ItemModule)[0];
-    const stats = it?.stats || {};
-    const views =
-      Number(stats.playCount ?? stats.viewCount ?? stats.play_count ?? stats.view_count ?? 0);
-    const likes =
-      Number(stats.diggCount ?? stats.digg_count ?? stats.likeCount ?? 0);
+    const st = it?.stats || {};
+    const views = Number(
+      st.playCount ?? st.viewCount ?? st.play_count ?? st.view_count ?? 0
+    );
+    const likes = Number(
+      st.diggCount ?? st.digg_count ?? st.likeCount ?? 0
+    );
+    const comments = Number(
+      st.commentCount ?? st.comment_count ?? 0
+    );
     const createMs = Number(it?.createTime ? it.createTime * 1000 : 0);
-    return { views, likes, createMs, src: "SIGI" };
+    return { views, likes, comments, createMs, src: "SIGI" };
   }
 
-  // 2) LD/regex fallbacks
-  let views = 0, likes = 0, createMs = 0;
+  // 2) regex fallbacks (videos & slideshows)
+  let views = 0, likes = 0, comments = 0, createMs = 0;
 
-  // createTime (seconds or ms)
   let m = html.match(/"createTime"\s*:\s*"?(\d{10,13})"?/i);
   if (m) {
     const v = Number(m[1]);
     createMs = v > 2_000_000_000 ? v : v * 1000;
   }
 
-  // views candidates
   const viewPatterns = [
     /"playCount"\s*:\s*"?([\d.,KMB]+)"?/i,
     /"viewCount"\s*:\s*"?([\d.,KMB]+)"?/i,
@@ -137,71 +137,120 @@ function statsFromVideoHTML(html) {
     /"views"\s*:\s*"?([\d.,KMB]+)"?/i,
     /([\d.,KMB]+)\s*(views|plays)/i,
   ];
-  for (const re of viewPatterns) {
-    const mm = html.match(re);
-    if (mm) { views = parseAbbrev(mm[1]); break; }
-  }
+  for (const re of viewPatterns) { const mm = html.match(re); if (mm) { views = parseAbbrev(mm[1]); break; } }
 
-  // likes candidates
   const likePatterns = [
     /"diggCount"\s*:\s*"?([\d.,KMB]+)"?/i,
     /"digg_count"\s*:\s*"?([\d.,KMB]+)"?/i,
     /"likeCount"\s*:\s*"?([\d.,KMB]+)"?/i,
     /([\d.,KMB]+)\s*likes?/i,
   ];
-  for (const re of likePatterns) {
-    const mm = html.match(re);
-    if (mm) { likes = parseAbbrev(mm[1]); break; }
-  }
+  for (const re of likePatterns) { const mm = html.match(re); if (mm) { likes = parseAbbrev(mm[1]); break; } }
 
-  return { views, likes, createMs, src: "REGEX" };
+  const commentPatterns = [
+    /"commentCount"\s*:\s*"?([\d.,KMB]+)"?/i,
+    /"comment_count"\s*:\s*"?([\d.,KMB]+)"?/i,
+    /([\d.,KMB]+)\s*comms?/i,
+    /([\d.,KMB]+)\s*comments?/i,
+  ];
+  for (const re of commentPatterns) { const mm = html.match(re); if (mm) { comments = parseAbbrev(mm[1]); break; } }
+
+  return { views, likes, comments, createMs, src: "REGEX" };
 }
 
-/* ---------- main workflow ---------- */
+function withinDays(ms, days) {
+  return ms >= (Date.now() - days * 24 * 3600 * 1000);
+}
+
 (async () => {
+  if (!CHANNEL_ID || !BOT_TOKEN) {
+    console.error("❌ Missing DISCORD_CHANNEL_ID or DISCORD_BOT_TOKEN");
+    process.exit(1);
+  }
+
   const handles = await readHandles();
-  const lines = ["**Latest post per account — views & likes**", ""];
+  const now = Date.now();
+  let posts = [];
+  let debug = [];
 
   for (const handle of handles) {
     try {
-      // fetch a profile variant that yields IDs
+      // 1) get recent ids from profile
       let ids = [];
-      for (const build of PROFILE_VARIANTS) {
-        const url = build(handle);
-        const html = await fetchMirror(url);
-        ids = recentIdsFromProfileHTML(html, MAX_IDS_PER_PROFILE);
-        if (ids.length) break;
-        await sleep(200);
+      for (const base of [
+        `https://www.tiktok.com/@${handle}`,
+        `https://www.tiktok.com/@${handle}?lang=en`,
+        `https://m.tiktok.com/@${handle}`,
+        `https://us.tiktok.com/@${handle}`
+      ]) {
+        try {
+          const html = await fetchMirror(base);
+          ids = recentIdsFromProfileHTML(html, MAX_IDS_PER_PROFILE);
+          if (ids.length) break;
+        } catch {}
+        await sleep(150);
       }
       if (!ids.length) {
-        lines.push(`• @${handle} — *(no recent post found)*`);
+        debug.push(`@${handle}: no ids`);
         continue;
       }
 
-      const newestId = ids[0];
-      let stats = { views: 0, likes: 0, createMs: 0, src: "N/A" };
+      // 2) read each post’s stats (stop early if many)
+      for (const id of ids) {
+        let stats = null;
+        for (const v of [
+          `https://www.tiktok.com/@${handle}/video/${id}`,
+          `https://www.tiktok.com/@${handle}/video/${id}?lang=en`,
+        ]) {
+          try {
+            const html = await fetchMirror(v);
+            stats = statsFromVideoHTML(html);
+            if (stats && (stats.views || stats.likes || stats.comments)) break;
+          } catch {}
+          await sleep(150);
+        }
+        if (!stats) continue;
 
-      // try two video URL variants to be safe
-      for (const v of VIDEO_VARIANTS) {
-        const url = v(handle, newestId);
-        const html = await fetchMirror(url);
-        const s = statsFromVideoHTML(html);
-        // take first non-zero result; otherwise keep last
-        if ((s.views || s.likes) && !stats.views && !stats.likes) stats = s;
-        else if (!stats.views && !stats.likes) stats = s;
-        await sleep(200);
+        if (withinDays(stats.createMs, DAYS_WINDOW) && stats.views >= MIN_VIEWS) {
+          posts.push({
+            handle,
+            id,
+            url: `https://www.tiktok.com/@${handle}/video/${id}`,
+            views: stats.views,
+            likes: stats.likes,
+            comments: stats.comments,
+            createMs: stats.createMs
+          });
+        }
       }
-
-      const postUrl = `https://www.tiktok.com/@${handle}/video/${newestId}`;
-      lines.push(
-        `• [@${handle}](https://www.tiktok.com/@${handle}) — **${n(stats.views)} views**, ❤️ ${n(stats.likes)} — [Post link](${postUrl})`
-      );
-      await sleep(500 + Math.random() * 300);
     } catch (e) {
-      lines.push(`• @${handle} — error: ${e.message || e}`);
+      debug.push(`@${handle}: ${e.message || e}`);
     }
+    await sleep(300);
   }
 
+  // sort by posted date (newest first)
+  posts.sort((a,b)=> b.createMs - a.createMs);
+
+  const header = `**Check Notification (last ${DAYS_WINDOW}D)**\n`;
+  const lines = [header];
+
+  if (posts.length === 0) {
+    lines.push(`No posts ≥ ${n(MIN_VIEWS)} views in the last ${DAYS_WINDOW} day(s).`);
+  } else {
+    posts.forEach((p,i) => {
+      lines.push(
+        `${i+1}. Post gained ${n(p.views)} views\n` +
+        `[Post Link](${p.url}) | [@${p.handle}](https://www.tiktok.com/@${p.handle}) | ` +
+        `${n(p.views)} views | ${n(p.likes)} likes | ${n(p.comments)} coms.\n` +
+        `posted ${ago(now, p.createMs)}\n`
+      );
+    });
+  }
+
+  // If you *don’t* want any debug line, comment this out:
+  // if (debug.length) lines.push("\n_Debug:_\n" + debug.join("\n"));
+
   await sendDiscord(lines.join("\n"));
-  console.log("✅ Sent.");
+  console.log("✅ Done");
 })();
