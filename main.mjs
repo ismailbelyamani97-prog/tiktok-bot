@@ -9,7 +9,7 @@ const BOT_TOKEN  = process.env.DISCORD_BOT_TOKEN;
 
 // === Rules you can tweak ===
 const DAYS_WINDOW = 7;          // last N days
-const MIN_VIEWS   = 50000;      // threshold
+const MIN_VIEWS   = 100;      // threshold
 const MAX_IDS_PER_PROFILE = 20; // how many recent ids to scan per account
 
 // ---- helpers
