@@ -1,5 +1,5 @@
 // main.mjs
-// Top 10 posts with most views in the last 48 hours, across all accounts
+// Top 10 posts with most views in the last 8 hours, across all accounts
 // Uses TikAPI
 // Secrets: DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID, TIKAPI_KEY
 // Input: accounts.txt (one handle per line, no "@")
@@ -13,7 +13,7 @@ const TIKAPI_KEY = process.env.TIKAPI_KEY;
 const TIKAPI_BASE = "https://api.tikapi.io";
 
 // window and limits
-const HOURS_WINDOW = 48;          // last 48 hours
+const HOURS_WINDOW = 8;           // last 8 hours
 const MAX_POSTS_PER_ACCOUNT = 30; // TikAPI max for /public/posts
 const TOP_N = 10;                 // how many posts to report
 
@@ -59,7 +59,7 @@ async function readHandles() {
 }
 
 async function sendDiscord(text) {
-  // leading ">>>" makes the whole message a multi line blockquote (vertical line)
+  // leading ">>>" makes the whole message a multi line blockquote (vertical bar)
   const content = `>>> ${text}`;
   const chunks = content.match(/[\s\S]{1,1800}/g) || [];
   for (const c of chunks) {
@@ -219,23 +219,26 @@ async function getRecentPostsForSecUid(handle, secUid) {
   posts.sort((a, b) => b.views - a.views);
   const top = posts.slice(0, TOP_N);
 
-  const header = `**Check Notification (last ${HOURS_WINDOW}H)**\n`;
-  const lines = [header];
+  // build compact message (no extra blank lines)
+  const lines = [];
+  lines.push(`**Check Notification (last ${HOURS_WINDOW}H)**`);
+  lines.push(""); // one blank line under header
 
   if (!top.length) {
     lines.push("No posts found in this window.");
   } else {
     top.forEach((p, i) => {
+      lines.push(`${i + 1}. Post gained ${fmtShort(p.views)} views`);
       lines.push(
-        `${i + 1}. Post gained ${fmtShort(p.views)} views\n` +
-        `[Post Link](${p.url}) | [@${p.handle}](https://www.tiktok.com/@${p.handle}) | ` +
-        `${fmtShort(p.views)} views | ${fmtShort(p.likes)} likes | ${fmtShort(p.comments)} coms.\n` +
-        `posted ${ago(now, p.createMs)}\n`
+        `Post Link | [@${p.handle}](https://www.tiktok.com/@${p.handle}) | ` +
+        `${fmtShort(p.views)} views | ${fmtShort(p.likes)} likes | ${fmtShort(p.comments)} coms.`
       );
+      lines.push(`posted ${ago(now, p.createMs)} ago`);
+      if (i !== top.length - 1) lines.push(""); // blank line between posts, not after last
     });
   }
 
-  // keep debug only in logs, not in Discord
+  // debug only in logs
   if (debug.length) {
     console.log("Debug:");
     console.log(debug.join("\n"));
