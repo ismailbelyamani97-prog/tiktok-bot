@@ -14,14 +14,13 @@ const TIKAPI_BASE = "https://api.tikapi.io";
 
 // window and limits
 const HOURS_WINDOW = 48;          // last 48 hours
-const MAX_POSTS_PER_ACCOUNT = 50; // how many recent posts to scan per account
+const MAX_POSTS_PER_ACCOUNT = 30; // TikAPI max for /public/posts
 const TOP_N = 10;                 // how many posts to report
 
 // helpers
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const fmt = (x) => (x ?? 0).toLocaleString("en-US");
 
-// "4 day(s) ago" style
 const ago = (now, tMs) => {
   if (!tMs) return "";
   const s = Math.floor((now - tMs) / 1000);
@@ -49,8 +48,6 @@ async function readHandles() {
 }
 
 async function sendDiscord(text) {
-  // flags: 4 => SUPPRESS_EMBEDS
-  // leading ">>>" makes a multi line quote with a green bar
   const content = `>>> ${text}`;
   const chunks = content.match(/[\s\S]{1,1800}/g) || [];
   for (const c of chunks) {
@@ -60,7 +57,7 @@ async function sendDiscord(text) {
         authorization: `Bot ${BOT_TOKEN}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ content: c, flags: 4 }),
+      body: JSON.stringify({ content: c, flags: 4 }), // 4 = suppress embeds
     });
     await sleep(250);
   }
@@ -107,7 +104,7 @@ async function getSecUidFromUsername(username) {
   return secUid;
 }
 
-// normalize a single post object
+// normalize a single post
 function normalizePost(handle, raw) {
   const stats = raw.stats || raw.statistics || {};
   const views = Number(
@@ -144,16 +141,13 @@ function normalizePost(handle, raw) {
   );
   let createMs = 0;
   if (createTime) {
-    // seconds vs milliseconds
     createMs = createTime > 2_000_000_000 ? createTime : createTime * 1000;
   }
 
   const url =
     raw.shareUrl ||
     raw.share_url ||
-    (id
-      ? `https://www.tiktok.com/@${handle}/video/${id}`
-      : "");
+    (id ? `https://www.tiktok.com/@${handle}/video/${id}` : "");
 
   return { handle, id, url, views, likes, comments, createMs };
 }
@@ -192,6 +186,10 @@ async function getRecentPostsForSecUid(handle, secUid) {
       const secUid = await getSecUidFromUsername(handle);
       const userPosts = await getRecentPostsForSecUid(handle, secUid);
 
+      if (!userPosts.length) {
+        debug.push(`@${handle}: no posts returned from TikAPI`);
+      }
+
       for (const p of userPosts) {
         if (!p.url || !p.createMs) continue;
         if (withinHours(p.createMs, HOURS_WINDOW)) {
@@ -205,7 +203,6 @@ async function getRecentPostsForSecUid(handle, secUid) {
     await sleep(400);
   }
 
-  // sort by views descending and take top N
   posts.sort((a, b) => b.views - a.views);
   const top = posts.slice(0, TOP_N);
 
@@ -227,8 +224,9 @@ async function getRecentPostsForSecUid(handle, secUid) {
     });
   }
 
-  // optional debug line if you want to see errors for some accounts
-  // if (debug.length) lines.push("\n_Debug:_\n" + debug.join("\n"));
+  if (debug.length) {
+    lines.push("\n_Debug:_\n" + debug.join("\n"));
+  }
 
   await sendDiscord(lines.join("\n"));
   console.log("Done");
