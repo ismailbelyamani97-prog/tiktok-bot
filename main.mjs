@@ -1,16 +1,18 @@
-// main.mjs — viral posts (last 7 days) with green bar + no embeds
-// Secrets needed: DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID
+// main.mjs - viral posts (last 7 days) with green bar + no embeds
+// Secrets needed: DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID, RAPIDAPI_KEY
 // Input file: accounts.txt (one handle per line, no "@")
 
 import fs from "fs/promises";
 
-const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
-const BOT_TOKEN  = process.env.DISCORD_BOT_TOKEN;
+const CHANNEL_ID   = process.env.DISCORD_CHANNEL_ID;
+const BOT_TOKEN    = process.env.DISCORD_BOT_TOKEN;
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
+const RAPIDAPI_HOST = "tiktok-api23.p.rapidapi.com";
 
 // === Rules you can tweak ===
-const DAYS_WINDOW = 7;          // last N days
-const MIN_VIEWS   = 100;      // threshold
-const MAX_IDS_PER_PROFILE = 20; // how many recent ids to scan per account
+const DAYS_WINDOW = 7;            // last N days
+const MIN_VIEWS   = 100;          // threshold
+const MAX_IDS_PER_PROFILE = 20;   // how many recent posts to scan per account
 
 // ---- helpers
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -26,7 +28,11 @@ const ago = (now, tMs) => {
 
 async function readHandles() {
   const raw = await fs.readFile("accounts.txt", "utf8");
-  return raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean).map(s => s.replace(/^@+/, ""));
+  return raw
+    .split(/\r?\n/)
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(s => s.replace(/^@+/, ""));
 }
 
 async function sendDiscord(text) {
@@ -47,124 +53,135 @@ async function sendDiscord(text) {
   }
 }
 
-async function fetchMirror(url) {
-  // read-only HTML mirror to avoid consent/JS
-  const proxied = `https://r.jina.ai/http://${url.replace(/^https?:\/\//, "")}`;
-  const res = await fetch(proxied, {
+// ============ TIKTOK RAPIDAPI INTEGRATION ============
+
+// basic wrapper for RapidAPI GET
+async function rapidGet(path, query = {}) {
+  const url = new URL(`https://${RAPIDAPI_HOST}${path}`);
+  for (const [k, v] of Object.entries(query)) {
+    if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+  }
+
+  const res = await fetch(url.toString(), {
+    method: "GET",
     headers: {
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
-      "accept-language": "en-US,en;q=0.9"
-    }
+      "x-rapidapi-key": RAPIDAPI_KEY,
+      "x-rapidapi-host": RAPIDAPI_HOST,
+    },
   });
-  if (!res.ok) throw new Error(`mirror HTTP ${res.status}`);
-  return res.text();
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`RapidAPI ${path} HTTP ${res.status} ${txt}`);
+  }
+  return res.json();
 }
 
-function parseSIGI(html) {
-  const m = html.match(/<script id="SIGI_STATE"[^>]*>([\s\S]*?)<\/script>/);
-  if (!m) return null;
-  try { return JSON.parse(m[1]); } catch { return null; }
+// Get secUid from handle using /api/user/info
+async function getSecUidFromHandle(handle) {
+  const data = await rapidGet("/api/user/info", { uniqueId: handle });
+  const secUid =
+    data?.userInfo?.user?.secUid ||
+    data?.user?.secUid ||
+    data?.secUid;
+
+  if (!secUid) {
+    throw new Error("no secUid in user/info response");
+  }
+  return secUid;
 }
 
-function recentIdsFromProfileHTML(html, max = MAX_IDS_PER_PROFILE) {
-  const ids = new Set();
+// Get recent posts for a user using /api/user/posts
+async function getRecentPostsForUser(secUid, maxCount = MAX_IDS_PER_PROFILE) {
+  const collected = [];
+  let cursor = 0;
+  let hasMore = true;
 
-  // best: SIGI ItemList
-  const sigi = parseSIGI(html);
-  const list = sigi?.ItemList?.["user-post"]?.list;
-  if (Array.isArray(list)) {
-    for (const id of list) {
-      ids.add(String(id));
-      if (ids.size >= max) break;
+  while (hasMore && collected.length < maxCount) {
+    const count = Math.min(20, maxCount - collected.length);
+
+    const data = await rapidGet("/api/user/posts", {
+      secUid,
+      count,
+      cursor,
+    });
+
+    // response shape can vary a bit - try common patterns
+    const items =
+      data?.data?.videos ||
+      data?.data?.items ||
+      data?.data ||
+      data?.itemList ||
+      data?.item_list ||
+      [];
+
+    for (const raw of items) {
+      collected.push(raw);
+      if (collected.length >= maxCount) break;
     }
+
+    hasMore = Boolean(data?.hasMore ?? data?.has_more);
+    cursor = data?.cursor ?? data?.cursorNext ?? cursor + count;
   }
 
-  // fallback: scan links
-  if (ids.size < max) {
-    const re = /\/video\/(\d{8,})/g;
-    let m;
-    while (ids.size < max && (m = re.exec(html))) ids.add(m[1]);
-  }
-  return [...ids];
+  return collected.slice(0, maxCount);
 }
 
-function parseAbbrev(str) {
-  if (!str) return 0;
-  const m = String(str).trim().match(/^([\d.,]+)\s*([KMB])?$/i);
-  if (!m) return Number(String(str).replace(/,/g, "")) || 0;
-  let num = Number(m[1].replace(/,/g, ""));
-  const suf = (m[2] || "").toUpperCase();
-  if (suf === "K") num *= 1e3;
-  if (suf === "M") num *= 1e6;
-  if (suf === "B") num *= 1e9;
-  return Math.round(num);
-}
+// Normalize post stats into the structure the rest of your script expects
+function normalizePost(handle, raw) {
+  const stats = raw.stats || raw.statistics || {};
+  const views = Number(
+    stats.playCount ??
+    stats.viewCount ??
+    stats.play_count ??
+    stats.view_count ??
+    0
+  );
+  const likes = Number(
+    stats.diggCount ??
+    stats.likeCount ??
+    stats.digg_count ??
+    stats.like_count ??
+    0
+  );
+  const comments = Number(
+    stats.commentCount ??
+    stats.comment_count ??
+    0
+  );
 
-function statsFromVideoHTML(html) {
-  // 1) SIGI (most reliable)
-  const sigi = parseSIGI(html);
-  if (sigi?.ItemModule) {
-    const it = Object.values(sigi.ItemModule)[0];
-    const st = it?.stats || {};
-    const views = Number(
-      st.playCount ?? st.viewCount ?? st.play_count ?? st.view_count ?? 0
-    );
-    const likes = Number(
-      st.diggCount ?? st.digg_count ?? st.likeCount ?? 0
-    );
-    const comments = Number(
-      st.commentCount ?? st.comment_count ?? 0
-    );
-    const createMs = Number(it?.createTime ? it.createTime * 1000 : 0);
-    return { views, likes, comments, createMs, src: "SIGI" };
-  }
+  const id = String(
+    raw.id ??
+    raw.awemeId ??
+    raw.aweme_id ??
+    raw.video_id ??
+    ""
+  );
 
-  // 2) regex fallbacks (videos & slideshows)
-  let views = 0, likes = 0, comments = 0, createMs = 0;
+  const createTime = Number(
+    raw.createTime ??
+    raw.create_time ??
+    0
+  );
+  const createMs = createTime ? createTime * 1000 : 0;
 
-  let m = html.match(/"createTime"\s*:\s*"?(\d{10,13})"?/i);
-  if (m) {
-    const v = Number(m[1]);
-    createMs = v > 2_000_000_000 ? v : v * 1000;
-  }
+  const url = id
+    ? `https://www.tiktok.com/@${handle}/video/${id}`
+    : (raw.shareUrl || raw.share_url || "");
 
-  const viewPatterns = [
-    /"playCount"\s*:\s*"?([\d.,KMB]+)"?/i,
-    /"viewCount"\s*:\s*"?([\d.,KMB]+)"?/i,
-    /"play_count"\s*:\s*"?([\d.,KMB]+)"?/i,
-    /"view_count"\s*:\s*"?([\d.,KMB]+)"?/i,
-    /"views"\s*:\s*"?([\d.,KMB]+)"?/i,
-    /([\d.,KMB]+)\s*(views|plays)/i,
-  ];
-  for (const re of viewPatterns) { const mm = html.match(re); if (mm) { views = parseAbbrev(mm[1]); break; } }
-
-  const likePatterns = [
-    /"diggCount"\s*:\s*"?([\d.,KMB]+)"?/i,
-    /"digg_count"\s*:\s*"?([\d.,KMB]+)"?/i,
-    /"likeCount"\s*:\s*"?([\d.,KMB]+)"?/i,
-    /([\d.,KMB]+)\s*likes?/i,
-  ];
-  for (const re of likePatterns) { const mm = html.match(re); if (mm) { likes = parseAbbrev(mm[1]); break; } }
-
-  const commentPatterns = [
-    /"commentCount"\s*:\s*"?([\d.,KMB]+)"?/i,
-    /"comment_count"\s*:\s*"?([\d.,KMB]+)"?/i,
-    /([\d.,KMB]+)\s*comms?/i,
-    /([\d.,KMB]+)\s*comments?/i,
-  ];
-  for (const re of commentPatterns) { const mm = html.match(re); if (mm) { comments = parseAbbrev(mm[1]); break; } }
-
-  return { views, likes, comments, createMs, src: "REGEX" };
+  return { handle, id, url, views, likes, comments, createMs };
 }
 
 function withinDays(ms, days) {
+  if (!ms) return false;
   return ms >= (Date.now() - days * 24 * 3600 * 1000);
 }
 
+// ================== MAIN ==================
+
 (async () => {
-  if (!CHANNEL_ID || !BOT_TOKEN) {
-    console.error("❌ Missing DISCORD_CHANNEL_ID or DISCORD_BOT_TOKEN");
+  if (!CHANNEL_ID || !BOT_TOKEN || !RAPIDAPI_KEY) {
+    console.error("❌ Missing DISCORD_CHANNEL_ID, DISCORD_BOT_TOKEN or RAPIDAPI_KEY");
     process.exit(1);
   }
 
@@ -175,62 +192,29 @@ function withinDays(ms, days) {
 
   for (const handle of handles) {
     try {
-      // 1) get recent ids from profile
-      let ids = [];
-      for (const base of [
-        `https://www.tiktok.com/@${handle}`,
-        `https://www.tiktok.com/@${handle}?lang=en`,
-        `https://m.tiktok.com/@${handle}`,
-        `https://us.tiktok.com/@${handle}`
-      ]) {
-        try {
-          const html = await fetchMirror(base);
-          ids = recentIdsFromProfileHTML(html, MAX_IDS_PER_PROFILE);
-          if (ids.length) break;
-        } catch {}
-        await sleep(150);
-      }
-      if (!ids.length) {
-        debug.push(`@${handle}: no ids`);
-        continue;
-      }
+      // 1) get secUid for the handle from RapidAPI
+      const secUid = await getSecUidFromHandle(handle);
 
-      // 2) read each post’s stats (stop early if many)
-      for (const id of ids) {
-        let stats = null;
-        for (const v of [
-          `https://www.tiktok.com/@${handle}/video/${id}`,
-          `https://www.tiktok.com/@${handle}/video/${id}?lang=en`,
-        ]) {
-          try {
-            const html = await fetchMirror(v);
-            stats = statsFromVideoHTML(html);
-            if (stats && (stats.views || stats.likes || stats.comments)) break;
-          } catch {}
-          await sleep(150);
-        }
-        if (!stats) continue;
+      // 2) get recent posts for that user
+      const rawPosts = await getRecentPostsForUser(secUid, MAX_IDS_PER_PROFILE);
 
-        if (withinDays(stats.createMs, DAYS_WINDOW) && stats.views >= MIN_VIEWS) {
-          posts.push({
-            handle,
-            id,
-            url: `https://www.tiktok.com/@${handle}/video/${id}`,
-            views: stats.views,
-            likes: stats.likes,
-            comments: stats.comments,
-            createMs: stats.createMs
-          });
+      for (const raw of rawPosts) {
+        const p = normalizePost(handle, raw);
+        if (!p.id) continue;
+
+        if (withinDays(p.createMs, DAYS_WINDOW) && p.views >= MIN_VIEWS) {
+          posts.push(p);
         }
       }
     } catch (e) {
       debug.push(`@${handle}: ${e.message || e}`);
     }
+
     await sleep(300);
   }
 
   // sort by posted date (newest first)
-  posts.sort((a,b)=> b.createMs - a.createMs);
+  posts.sort((a, b) => b.createMs - a.createMs);
 
   const header = `**Check Notification (last ${DAYS_WINDOW}D)**\n`;
   const lines = [header];
@@ -238,9 +222,9 @@ function withinDays(ms, days) {
   if (posts.length === 0) {
     lines.push(`No posts ≥ ${n(MIN_VIEWS)} views in the last ${DAYS_WINDOW} day(s).`);
   } else {
-    posts.forEach((p,i) => {
+    posts.forEach((p, i) => {
       lines.push(
-        `${i+1}. Post gained ${n(p.views)} views\n` +
+        `${i + 1}. Post gained ${n(p.views)} views\n` +
         `[Post Link](${p.url}) | [@${p.handle}](https://www.tiktok.com/@${p.handle}) | ` +
         `${n(p.views)} views | ${n(p.likes)} likes | ${n(p.comments)} coms.\n` +
         `posted ${ago(now, p.createMs)}\n`
@@ -248,7 +232,7 @@ function withinDays(ms, days) {
     });
   }
 
-  // If you *don’t* want any debug line, comment this out:
+  // If you want debug lines, uncomment this:
   // if (debug.length) lines.push("\n_Debug:_\n" + debug.join("\n"));
 
   await sendDiscord(lines.join("\n"));
