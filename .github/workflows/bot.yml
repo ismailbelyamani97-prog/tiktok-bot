@@ -3,7 +3,7 @@ name: tiktok-bot
 on:
   workflow_dispatch:        # run manually
   schedule:
-    - cron: "0 */8 * * *"   # every 8 hours (UTC) you can change this if you want
+    - cron: "0 */8 * * *"   # every 8 hours (UTC)
 
 concurrency:
   group: tiktok-bot
@@ -23,11 +23,9 @@ jobs:
         with:
           node-version: "20"
 
-      # no npm install needed, script has no external deps
-
       - name: Run bot
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
-          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+          TIKAPI_KEY: ${{ secrets.TIKAPI_KEY }}
         run: node main.mjs
