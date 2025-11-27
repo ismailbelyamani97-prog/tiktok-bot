@@ -1,28 +1,31 @@
-// main.mjs - viral posts (last 7 days) with green bar + no embeds
+// main.mjs - viral popular posts (last 7 days) with green bar + no embeds
 // Secrets needed: DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID, RAPIDAPI_KEY
 // Input file: accounts.txt (one handle per line, no "@")
 
 import fs from "fs/promises";
 
-const CHANNEL_ID   = process.env.DISCORD_CHANNEL_ID;
-const BOT_TOKEN    = process.env.DISCORD_BOT_TOKEN;
+const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
+const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
 const RAPIDAPI_HOST = "tiktok-api23.p.rapidapi.com";
 
 // === Rules you can tweak ===
-const DAYS_WINDOW = 7;            // last N days
-const MIN_VIEWS   = 100;          // threshold
-const MAX_IDS_PER_PROFILE = 20;   // how many recent posts to scan per account
+const DAYS_WINDOW = 7; // last N days
+const MIN_VIEWS = 100; // threshold
+const MAX_IDS_PER_PROFILE = 20; // how many popular posts to scan per account
 
 // ---- helpers
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const n = (x) => (x ?? 0).toLocaleString("en-US");
 const ago = (now, tMs) => {
   if (!tMs) return "";
   const s = Math.floor((now - tMs) / 1000);
-  const d = Math.floor(s / 86400); if (d) return `${d} day(s) ago`;
-  const h = Math.floor((s % 86400) / 3600); if (h) return `${h} hour(s) ago`;
-  const m = Math.floor((s % 3600) / 60); if (m) return `${m} min(s) ago`;
+  const d = Math.floor(s / 86400);
+  if (d) return `${d} day(s) ago`;
+  const h = Math.floor((s % 86400) / 3600);
+  if (h) return `${h} hour(s) ago`;
+  const m = Math.floor((s % 3600) / 60);
+  if (m) return `${m} min(s) ago`;
   return "just now";
 };
 
@@ -30,14 +33,14 @@ async function readHandles() {
   const raw = await fs.readFile("accounts.txt", "utf8");
   return raw
     .split(/\r?\n/)
-    .map(s => s.trim())
+    .map((s) => s.trim())
     .filter(Boolean)
-    .map(s => s.replace(/^@+/, ""));
+    .map((s) => s.replace(/^@+/, ""));
 }
 
 async function sendDiscord(text) {
   // flags: 4 => SUPPRESS_EMBEDS (no huge previews)
-  // leading ">>>" makes the whole message a multi-line blockquote (green bar)
+  // leading ">>>" makes the whole message a multi line blockquote (green bar)
   const content = `>>> ${text}`;
   const chunks = content.match(/[\s\S]{1,1800}/g) || [];
   for (const c of chunks) {
@@ -47,7 +50,7 @@ async function sendDiscord(text) {
         authorization: `Bot ${BOT_TOKEN}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ content: c, flags: 4 })
+      body: JSON.stringify({ content: c, flags: 4 }),
     });
     await sleep(250);
   }
@@ -59,7 +62,9 @@ async function sendDiscord(text) {
 async function rapidGet(path, query = {}) {
   const url = new URL(`https://${RAPIDAPI_HOST}${path}`);
   for (const [k, v] of Object.entries(query)) {
-    if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+    if (v !== undefined && v !== null) {
+      url.searchParams.set(k, String(v));
+    }
   }
 
   const res = await fetch(url.toString(), {
@@ -91,7 +96,7 @@ async function getSecUidFromHandle(handle) {
   return secUid;
 }
 
-// Get recent posts for a user using /api/user/posts
+// Get popular posts for a user using /api/user/popular-posts
 async function getRecentPostsForUser(secUid, maxCount = MAX_IDS_PER_PROFILE) {
   const collected = [];
   let cursor = 0;
@@ -100,13 +105,13 @@ async function getRecentPostsForUser(secUid, maxCount = MAX_IDS_PER_PROFILE) {
   while (hasMore && collected.length < maxCount) {
     const count = Math.min(20, maxCount - collected.length);
 
-    const data = await rapidGet("/api/user/posts", {
+    const data = await rapidGet("/api/user/popular-posts", {
       secUid,
       count,
       cursor,
     });
 
-    // response shape can vary a bit - try common patterns
+    // response shape can vary a bit
     const items =
       data?.data?.videos ||
       data?.data?.items ||
@@ -132,56 +137,56 @@ function normalizePost(handle, raw) {
   const stats = raw.stats || raw.statistics || {};
   const views = Number(
     stats.playCount ??
-    stats.viewCount ??
-    stats.play_count ??
-    stats.view_count ??
-    0
+      stats.viewCount ??
+      stats.play_count ??
+      stats.view_count ??
+      0
   );
   const likes = Number(
     stats.diggCount ??
-    stats.likeCount ??
-    stats.digg_count ??
-    stats.like_count ??
-    0
+      stats.likeCount ??
+      stats.digg_count ??
+      stats.like_count ??
+      0
   );
   const comments = Number(
     stats.commentCount ??
-    stats.comment_count ??
-    0
+      stats.comment_count ??
+      0
   );
 
   const id = String(
     raw.id ??
-    raw.awemeId ??
-    raw.aweme_id ??
-    raw.video_id ??
-    ""
+      raw.awemeId ??
+      raw.aweme_id ??
+      raw.video_id ??
+      ""
   );
 
   const createTime = Number(
     raw.createTime ??
-    raw.create_time ??
-    0
+      raw.create_time ??
+      0
   );
   const createMs = createTime ? createTime * 1000 : 0;
 
   const url = id
     ? `https://www.tiktok.com/@${handle}/video/${id}`
-    : (raw.shareUrl || raw.share_url || "");
+    : raw.shareUrl || raw.share_url || "";
 
   return { handle, id, url, views, likes, comments, createMs };
 }
 
 function withinDays(ms, days) {
   if (!ms) return false;
-  return ms >= (Date.now() - days * 24 * 3600 * 1000);
+  return ms >= Date.now() - days * 24 * 3600 * 1000;
 }
 
 // ================== MAIN ==================
 
 (async () => {
   if (!CHANNEL_ID || !BOT_TOKEN || !RAPIDAPI_KEY) {
-    console.error("❌ Missing DISCORD_CHANNEL_ID, DISCORD_BOT_TOKEN or RAPIDAPI_KEY");
+    console.error("Missing DISCORD_CHANNEL_ID, DISCORD_BOT_TOKEN or RAPIDAPI_KEY");
     process.exit(1);
   }
 
@@ -195,7 +200,7 @@ function withinDays(ms, days) {
       // 1) get secUid for the handle from RapidAPI
       const secUid = await getSecUidFromHandle(handle);
 
-      // 2) get recent posts for that user
+      // 2) get popular posts for that user
       const rawPosts = await getRecentPostsForUser(secUid, MAX_IDS_PER_PROFILE);
 
       for (const raw of rawPosts) {
@@ -220,21 +225,27 @@ function withinDays(ms, days) {
   const lines = [header];
 
   if (posts.length === 0) {
-    lines.push(`No posts ≥ ${n(MIN_VIEWS)} views in the last ${DAYS_WINDOW} day(s).`);
+    lines.push(
+      `No posts ≥ ${n(
+        MIN_VIEWS
+      )} views in the last ${DAYS_WINDOW} day(s).`
+    );
   } else {
     posts.forEach((p, i) => {
       lines.push(
         `${i + 1}. Post gained ${n(p.views)} views\n` +
-        `[Post Link](${p.url}) | [@${p.handle}](https://www.tiktok.com/@${p.handle}) | ` +
-        `${n(p.views)} views | ${n(p.likes)} likes | ${n(p.comments)} coms.\n` +
-        `posted ${ago(now, p.createMs)}\n`
+          `[Post Link](${p.url}) | [@${p.handle}](https://www.tiktok.com/@${p.handle}) | ` +
+          `${n(p.views)} views | ${n(p.likes)} likes | ${n(
+            p.comments
+          )} coms.\n` +
+          `posted ${ago(now, p.createMs)}\n`
       );
     });
   }
 
-  // If you want debug lines, uncomment this:
+  // If you want debug lines in Discord, uncomment this:
   // if (debug.length) lines.push("\n_Debug:_\n" + debug.join("\n"));
 
   await sendDiscord(lines.join("\n"));
-  console.log("✅ Done");
+  console.log("Done");
 })();
