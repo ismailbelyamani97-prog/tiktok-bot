@@ -1,5 +1,5 @@
 // main.mjs
-// Top 10 posts with most views in the last 8 hours, across all accounts
+// Top 10 posts that gained the most views since the last run (view delta)
 // Uses TikAPI
 // Secrets: DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID, TIKAPI_KEY
 // Input: accounts.txt (one handle per line, no "@")
@@ -12,10 +12,15 @@ const TIKAPI_KEY = process.env.TIKAPI_KEY;
 
 const TIKAPI_BASE = "https://api.tikapi.io";
 
-// window and limits
-const HOURS_WINDOW = 8;           // last 8 hours
-const MAX_POSTS_PER_ACCOUNT = 30; // TikAPI max for /public/posts
-const TOP_N = 10;                 // how many posts to report
+// label only, the time window of the update, not used in logic
+const WINDOW_LABEL_HOURS = 8;
+
+// TikAPI limits
+const MAX_POSTS_PER_ACCOUNT = 30;
+const TOP_N = 10;
+
+// where we store last known view counts
+const CACHE_FILE = "views_cache.json";
 
 // helpers
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -44,11 +49,6 @@ const ago = (now, tMs) => {
   return "just now";
 };
 
-function withinHours(ms, hours) {
-  if (!ms) return false;
-  return ms >= Date.now() - hours * 3600 * 1000;
-}
-
 async function readHandles() {
   const raw = await fs.readFile("accounts.txt", "utf8");
   return raw
@@ -73,6 +73,20 @@ async function sendDiscord(text) {
     });
     await sleep(250);
   }
+}
+
+// cache helpers
+async function loadCache() {
+  try {
+    const raw = await fs.readFile(CACHE_FILE, "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+async function saveCache(cache) {
+  await fs.writeFile(CACHE_FILE, JSON.stringify(cache, null, 2), "utf8");
 }
 
 // TikAPI GET wrapper
@@ -190,6 +204,8 @@ async function getRecentPostsForSecUid(handle, secUid) {
 
   const handles = await readHandles();
   const now = Date.now();
+  const cache = await loadCache(); // { [postId]: { views } }
+
   let posts = [];
   let debug = [];
 
@@ -203,10 +219,22 @@ async function getRecentPostsForSecUid(handle, secUid) {
       }
 
       for (const p of userPosts) {
-        if (!p.url || !p.createMs) continue;
-        if (withinHours(p.createMs, HOURS_WINDOW)) {
-          posts.push(p);
-        }
+        if (!p.url || !p.id) continue;
+
+        const key = String(p.id);
+        const prevViews = cache[key]?.views ?? 0;
+        const gained = Math.max(0, p.views - prevViews);
+
+        posts.push({
+          ...p,
+          gained,
+        });
+
+        // update cache to current value
+        cache[key] = {
+          views: p.views,
+          updatedAt: now,
+        };
       }
     } catch (e) {
       debug.push(`@${handle}: ${e.message || e}`);
@@ -215,30 +243,35 @@ async function getRecentPostsForSecUid(handle, secUid) {
     await sleep(400);
   }
 
-  // sort by views descending, take top N
-  posts.sort((a, b) => b.views - a.views);
+  // save updated cache for next run
+  await saveCache(cache);
+
+  // keep only posts that actually gained views
+  posts = posts.filter((p) => p.gained > 0);
+
+  // sort by gained views descending, take top N
+  posts.sort((a, b) => b.gained - a.gained);
   const top = posts.slice(0, TOP_N);
 
-  // build compact message (no extra blank lines)
+  // build compact message like your reference
   const lines = [];
-  lines.push(`**Check Notification (last ${HOURS_WINDOW}H)**`);
-  lines.push(""); // one blank line under header
+  lines.push(`**Check Notification (last ${WINDOW_LABEL_HOURS}H)**`);
+  lines.push("");
 
   if (!top.length) {
-    lines.push("No posts found in this window.");
+    lines.push("No posts gained views since last check.");
   } else {
     top.forEach((p, i) => {
-      lines.push(`${i + 1}. Post gained ${fmtShort(p.views)} views`);
+      lines.push(`${i + 1}. Post gained ${fmtShort(p.gained)} views`);
       lines.push(
         `Post Link | [@${p.handle}](https://www.tiktok.com/@${p.handle}) | ` +
         `${fmtShort(p.views)} views | ${fmtShort(p.likes)} likes | ${fmtShort(p.comments)} coms.`
       );
       lines.push(`posted ${ago(now, p.createMs)} ago`);
-      if (i !== top.length - 1) lines.push(""); // blank line between posts, not after last
+      if (i !== top.length - 1) lines.push("");
     });
   }
 
-  // debug only in logs
   if (debug.length) {
     console.log("Debug:");
     console.log(debug.join("\n"));
