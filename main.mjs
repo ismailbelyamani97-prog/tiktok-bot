@@ -264,7 +264,7 @@ async function getRecentPostsForSecUid(handle, secUid) {
     top.forEach((p, i) => {
       lines.push(`${i + 1}. Post gained ${fmtShort(p.gained)} views`);
       lines.push(
-        `Post Link | [@${p.handle}](https://www.tiktok.com/@${p.handle}) | ` +
+        `[Post Link](${p.url}) | [@${p.handle}](https://www.tiktok.com/@${p.handle}) | ` +
         `${fmtShort(p.views)} views | ${fmtShort(p.likes)} likes | ${fmtShort(p.comments)} coms.`
       );
       lines.push(`posted ${ago(now, p.createMs)} ago`);
