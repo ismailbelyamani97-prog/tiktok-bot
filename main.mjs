@@ -1,6 +1,6 @@
 // main.mjs
-// Very simple: send the latest TikTok post link from each account to Discord
-// Secrets needed: DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID, RAPIDAPI_KEY
+// Uses TikAPI to send the latest TikTok post link for each account to Discord
+// Secrets needed: DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID, TIKAPI_KEY
 // Input file: accounts.txt (one handle per line, no "@")
 
 import fs from "fs/promises";
@@ -8,10 +8,11 @@ import fs from "fs/promises";
 // env vars from GitHub Actions
 const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
-const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
-const RAPIDAPI_HOST = "tiktok-api23.p.rapidapi.com";
+const TIKAPI_KEY = process.env.TIKAPI_KEY;
 
-// small helpers
+const TIKAPI_BASE = "https://api.tikapi.io";
+
+// helpers
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function readHandles() {
@@ -25,7 +26,7 @@ async function readHandles() {
 
 async function sendDiscord(text) {
   // flags: 4 => SUPPRESS_EMBEDS
-  // leading ">>>" makes a green bar quote block
+  // leading ">>>" turns the message into a blockquote with a vertical bar
   const content = `>>> ${text}`;
   const chunks = content.match(/[\s\S]{1,1800}/g) || [];
   for (const c of chunks) {
@@ -41,9 +42,9 @@ async function sendDiscord(text) {
   }
 }
 
-// basic RapidAPI GET wrapper
-async function rapidGet(path, query = {}) {
-  const url = new URL(`https://${RAPIDAPI_HOST}${path}`);
+// basic TikAPI GET wrapper
+async function tikapiGet(path, query = {}) {
+  const url = new URL(TIKAPI_BASE + path);
   for (const [k, v] of Object.entries(query)) {
     if (v !== undefined && v !== null) {
       url.searchParams.set(k, String(v));
@@ -53,47 +54,47 @@ async function rapidGet(path, query = {}) {
   const res = await fetch(url.toString(), {
     method: "GET",
     headers: {
-      "x-rapidapi-key": RAPIDAPI_KEY,
-      "x-rapidapi-host": RAPIDAPI_HOST,
+      "X-API-KEY": TIKAPI_KEY,
     },
   });
 
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`RapidAPI ${path} HTTP ${res.status} ${txt}`);
+  let json = null;
+  try {
+    json = await res.json();
+  } catch {
+    throw new Error(`TikAPI returned non JSON response, HTTP ${res.status}`);
   }
-  return res.json();
+
+  if (json?.status === "error") {
+    throw new Error(json.message || "TikAPI error");
+  }
+
+  return json;
 }
 
-// step 1: get secUid from username
-async function getSecUidFromHandle(handle) {
-  const data = await rapidGet("/api/user/info", { uniqueId: handle });
+// 1) from @username to secUid using TikAPI public/check
+async function getSecUidFromUsername(username) {
+  const data = await tikapiGet("/public/check", { username });
 
-  const secUid =
-    data?.userInfo?.user?.secUid ||
-    data?.user?.secUid ||
-    data?.secUid;
-
+  const secUid = data?.userInfo?.user?.secUid;
   if (!secUid) {
-    throw new Error("no secUid in user/info response");
+    throw new Error("secUid not found in profile response");
   }
   return secUid;
 }
 
-// step 2: get latest post for that secUid
-async function getLatestPostForUser(handle, secUid) {
-  const data = await rapidGet("/api/user/posts", {
+// 2) from secUid to latest feed post using TikAPI public/posts
+async function getLatestPostFromSecUid(handle, secUid) {
+  const data = await tikapiGet("/public/posts", {
     secUid,
     count: 1,
     cursor: 0,
   });
 
   const items =
-    data?.data?.videos ||
-    data?.data?.items ||
-    data?.data ||
     data?.itemList ||
-    data?.item_list ||
+    data?.items ||
+    data?.aweme_list ||
     [];
 
   if (!items.length) {
@@ -113,27 +114,26 @@ async function getLatestPostForUser(handle, secUid) {
 
   const id =
     raw.id ||
-    raw.awemeId ||
     raw.aweme_id ||
-    raw.video_id;
+    raw.awemeId ||
+    raw.video?.id;
 
   if (!id) {
-    return null;
+    return { handle, url: null, views };
   }
 
-  const url = `https://www.tiktok.com/@${handle}/video/${id}`;
+  const url =
+    raw.shareUrl ||
+    raw.share_url ||
+    `https://www.tiktok.com/@${handle}/video/${id}`;
 
-  return {
-    handle,
-    url,
-    views,
-  };
+  return { handle, url, views };
 }
 
 // main script
 (async () => {
-  if (!CHANNEL_ID || !BOT_TOKEN || !RAPIDAPI_KEY) {
-    console.error("Missing DISCORD_CHANNEL_ID, DISCORD_BOT_TOKEN or RAPIDAPI_KEY");
+  if (!CHANNEL_ID || !BOT_TOKEN || !TIKAPI_KEY) {
+    console.error("Missing DISCORD_CHANNEL_ID, DISCORD_BOT_TOKEN or TIKAPI_KEY");
     process.exit(1);
   }
 
@@ -142,10 +142,10 @@ async function getLatestPostForUser(handle, secUid) {
 
   for (const handle of handles) {
     try {
-      const secUid = await getSecUidFromHandle(handle);
-      const latest = await getLatestPostForUser(handle, secUid);
+      const secUid = await getSecUidFromUsername(handle);
+      const latest = await getLatestPostFromSecUid(handle, secUid);
 
-      if (!latest) {
+      if (!latest || !latest.url) {
         lines.push(`No posts found for @${handle}`);
       } else {
         lines.push(
@@ -156,7 +156,7 @@ async function getLatestPostForUser(handle, secUid) {
       lines.push(`Error for @${handle}: ${e.message || e}`);
     }
 
-    await sleep(300);
+    await sleep(400);
   }
 
   await sendDiscord(lines.join("\n"));
