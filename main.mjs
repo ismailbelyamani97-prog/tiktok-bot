@@ -1,33 +1,18 @@
-// main.mjs - viral popular posts (last 7 days) with green bar + no embeds
+// main.mjs
+// Very simple: send the latest TikTok post link from each account to Discord
 // Secrets needed: DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID, RAPIDAPI_KEY
 // Input file: accounts.txt (one handle per line, no "@")
 
 import fs from "fs/promises";
 
+// env vars from GitHub Actions
 const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
 const RAPIDAPI_HOST = "tiktok-api23.p.rapidapi.com";
 
-// === Rules you can tweak ===
-const DAYS_WINDOW = 7; // last N days
-const MIN_VIEWS = 100; // threshold
-const MAX_IDS_PER_PROFILE = 20; // how many popular posts to scan per account
-
-// ---- helpers
+// small helpers
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const n = (x) => (x ?? 0).toLocaleString("en-US");
-const ago = (now, tMs) => {
-  if (!tMs) return "";
-  const s = Math.floor((now - tMs) / 1000);
-  const d = Math.floor(s / 86400);
-  if (d) return `${d} day(s) ago`;
-  const h = Math.floor((s % 86400) / 3600);
-  if (h) return `${h} hour(s) ago`;
-  const m = Math.floor((s % 3600) / 60);
-  if (m) return `${m} min(s) ago`;
-  return "just now";
-};
 
 async function readHandles() {
   const raw = await fs.readFile("accounts.txt", "utf8");
@@ -39,8 +24,8 @@ async function readHandles() {
 }
 
 async function sendDiscord(text) {
-  // flags: 4 => SUPPRESS_EMBEDS (no huge previews)
-  // leading ">>>" makes the whole message a multi line blockquote (green bar)
+  // flags: 4 => SUPPRESS_EMBEDS
+  // leading ">>>" makes a green bar quote block
   const content = `>>> ${text}`;
   const chunks = content.match(/[\s\S]{1,1800}/g) || [];
   for (const c of chunks) {
@@ -56,9 +41,7 @@ async function sendDiscord(text) {
   }
 }
 
-// ============ TIKTOK RAPIDAPI INTEGRATION ============
-
-// basic wrapper for RapidAPI GET
+// basic RapidAPI GET wrapper
 async function rapidGet(path, query = {}) {
   const url = new URL(`https://${RAPIDAPI_HOST}${path}`);
   for (const [k, v] of Object.entries(query)) {
@@ -82,9 +65,10 @@ async function rapidGet(path, query = {}) {
   return res.json();
 }
 
-// Get secUid from handle using /api/user/info
+// step 1: get secUid from username
 async function getSecUidFromHandle(handle) {
   const data = await rapidGet("/api/user/info", { uniqueId: handle });
+
   const secUid =
     data?.userInfo?.user?.secUid ||
     data?.user?.secUid ||
@@ -96,44 +80,28 @@ async function getSecUidFromHandle(handle) {
   return secUid;
 }
 
-// Get popular posts for a user using /api/user/popular-posts
-async function getRecentPostsForUser(secUid, maxCount = MAX_IDS_PER_PROFILE) {
-  const collected = [];
-  let cursor = 0;
-  let hasMore = true;
+// step 2: get latest post for that secUid
+async function getLatestPostForUser(handle, secUid) {
+  const data = await rapidGet("/api/user/posts", {
+    secUid,
+    count: 1,
+    cursor: 0,
+  });
 
-  while (hasMore && collected.length < maxCount) {
-    const count = Math.min(20, maxCount - collected.length);
+  const items =
+    data?.data?.videos ||
+    data?.data?.items ||
+    data?.data ||
+    data?.itemList ||
+    data?.item_list ||
+    [];
 
-    const data = await rapidGet("/api/user/popular-posts", {
-      secUid,
-      count,
-      cursor,
-    });
-
-    // response shape can vary a bit
-    const items =
-      data?.data?.videos ||
-      data?.data?.items ||
-      data?.data ||
-      data?.itemList ||
-      data?.item_list ||
-      [];
-
-    for (const raw of items) {
-      collected.push(raw);
-      if (collected.length >= maxCount) break;
-    }
-
-    hasMore = Boolean(data?.hasMore ?? data?.has_more);
-    cursor = data?.cursor ?? data?.cursorNext ?? cursor + count;
+  if (!items.length) {
+    return null;
   }
 
-  return collected.slice(0, maxCount);
-}
+  const raw = items[0];
 
-// Normalize post stats into the structure the rest of your script expects
-function normalizePost(handle, raw) {
   const stats = raw.stats || raw.statistics || {};
   const views = Number(
     stats.playCount ??
@@ -142,48 +110,27 @@ function normalizePost(handle, raw) {
       stats.view_count ??
       0
   );
-  const likes = Number(
-    stats.diggCount ??
-      stats.likeCount ??
-      stats.digg_count ??
-      stats.like_count ??
-      0
-  );
-  const comments = Number(
-    stats.commentCount ??
-      stats.comment_count ??
-      0
-  );
 
-  const id = String(
-    raw.id ??
-      raw.awemeId ??
-      raw.aweme_id ??
-      raw.video_id ??
-      ""
-  );
+  const id =
+    raw.id ||
+    raw.awemeId ||
+    raw.aweme_id ||
+    raw.video_id;
 
-  const createTime = Number(
-    raw.createTime ??
-      raw.create_time ??
-      0
-  );
-  const createMs = createTime ? createTime * 1000 : 0;
+  if (!id) {
+    return null;
+  }
 
-  const url = id
-    ? `https://www.tiktok.com/@${handle}/video/${id}`
-    : raw.shareUrl || raw.share_url || "";
+  const url = `https://www.tiktok.com/@${handle}/video/${id}`;
 
-  return { handle, id, url, views, likes, comments, createMs };
+  return {
+    handle,
+    url,
+    views,
+  };
 }
 
-function withinDays(ms, days) {
-  if (!ms) return false;
-  return ms >= Date.now() - days * 24 * 3600 * 1000;
-}
-
-// ================== MAIN ==================
-
+// main script
 (async () => {
   if (!CHANNEL_ID || !BOT_TOKEN || !RAPIDAPI_KEY) {
     console.error("Missing DISCORD_CHANNEL_ID, DISCORD_BOT_TOKEN or RAPIDAPI_KEY");
@@ -191,60 +138,26 @@ function withinDays(ms, days) {
   }
 
   const handles = await readHandles();
-  const now = Date.now();
-  let posts = [];
-  let debug = [];
+  const lines = ["Latest TikTok post for each account:\n"];
 
   for (const handle of handles) {
     try {
-      // 1) get secUid for the handle from RapidAPI
       const secUid = await getSecUidFromHandle(handle);
+      const latest = await getLatestPostForUser(handle, secUid);
 
-      // 2) get popular posts for that user
-      const rawPosts = await getRecentPostsForUser(secUid, MAX_IDS_PER_PROFILE);
-
-      for (const raw of rawPosts) {
-        const p = normalizePost(handle, raw);
-        if (!p.id) continue;
-
-        if (withinDays(p.createMs, DAYS_WINDOW) && p.views >= MIN_VIEWS) {
-          posts.push(p);
-        }
+      if (!latest) {
+        lines.push(`No posts found for @${handle}`);
+      } else {
+        lines.push(
+          `@${handle}: ${latest.url} (views: ${latest.views})`
+        );
       }
     } catch (e) {
-      debug.push(`@${handle}: ${e.message || e}`);
+      lines.push(`Error for @${handle}: ${e.message || e}`);
     }
 
     await sleep(300);
   }
-
-  // sort by posted date (newest first)
-  posts.sort((a, b) => b.createMs - a.createMs);
-
-  const header = `**Check Notification (last ${DAYS_WINDOW}D)**\n`;
-  const lines = [header];
-
-  if (posts.length === 0) {
-    lines.push(
-      `No posts ≥ ${n(
-        MIN_VIEWS
-      )} views in the last ${DAYS_WINDOW} day(s).`
-    );
-  } else {
-    posts.forEach((p, i) => {
-      lines.push(
-        `${i + 1}. Post gained ${n(p.views)} views\n` +
-          `[Post Link](${p.url}) | [@${p.handle}](https://www.tiktok.com/@${p.handle}) | ` +
-          `${n(p.views)} views | ${n(p.likes)} likes | ${n(
-            p.comments
-          )} coms.\n` +
-          `posted ${ago(now, p.createMs)}\n`
-      );
-    });
-  }
-
-  // If you want debug lines in Discord, uncomment this:
-  // if (debug.length) lines.push("\n_Debug:_\n" + debug.join("\n"));
 
   await sendDiscord(lines.join("\n"));
   console.log("Done");
