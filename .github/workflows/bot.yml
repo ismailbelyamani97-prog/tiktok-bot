@@ -5,6 +5,9 @@ on:
   schedule:
     - cron: "0 */8 * * *"   # every 8 hours (UTC)
 
+permissions:
+  contents: write           # allow pushes from github-actions[bot]
+
 concurrency:
   group: tiktok-bot
   cancel-in-progress: true
@@ -17,6 +20,8 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true   # needed so we can push
 
       - name: Setup Node
         uses: actions/setup-node@v4
