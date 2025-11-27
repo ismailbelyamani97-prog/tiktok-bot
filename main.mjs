@@ -19,8 +19,19 @@ const TOP_N = 10;                 // how many posts to report
 
 // helpers
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const fmt = (x) => (x ?? 0).toLocaleString("en-US");
 
+const fmtInt = (x) => (x ?? 0).toLocaleString("en-US");
+
+// 300K / 8.2M style
+function fmtShort(num) {
+  const x = Number(num ?? 0);
+  if (x >= 1_000_000_000) return (x / 1_000_000_000).toFixed(1).replace(/\.0$/, "") + "B";
+  if (x >= 1_000_000) return (x / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
+  if (x >= 1_000) return (x / 1_000).toFixed(1).replace(/\.0$/, "") + "K";
+  return x.toString();
+}
+
+// "4 day(s) ago" style
 const ago = (now, tMs) => {
   if (!tMs) return "";
   const s = Math.floor((now - tMs) / 1000);
@@ -48,6 +59,7 @@ async function readHandles() {
 }
 
 async function sendDiscord(text) {
+  // leading ">>>" makes the whole message a multi line blockquote (vertical line)
   const content = `>>> ${text}`;
   const chunks = content.match(/[\s\S]{1,1800}/g) || [];
   for (const c of chunks) {
@@ -203,6 +215,7 @@ async function getRecentPostsForSecUid(handle, secUid) {
     await sleep(400);
   }
 
+  // sort by views descending, take top N
   posts.sort((a, b) => b.views - a.views);
   const top = posts.slice(0, TOP_N);
 
@@ -214,18 +227,18 @@ async function getRecentPostsForSecUid(handle, secUid) {
   } else {
     top.forEach((p, i) => {
       lines.push(
-        `${i + 1}. Post gained ${fmt(p.views)} views\n` +
-          `[Post Link](${p.url}) | [@${p.handle}](https://www.tiktok.com/@${p.handle}) | ` +
-          `${fmt(p.views)} views | ${fmt(p.likes)} likes | ${fmt(
-            p.comments
-          )} coms.\n` +
-          `posted ${ago(now, p.createMs)}\n`
+        `${i + 1}. Post gained ${fmtShort(p.views)} views\n` +
+        `[Post Link](${p.url}) | [@${p.handle}](https://www.tiktok.com/@${p.handle}) | ` +
+        `${fmtShort(p.views)} views | ${fmtShort(p.likes)} likes | ${fmtShort(p.comments)} coms.\n` +
+        `posted ${ago(now, p.createMs)}\n`
       );
     });
   }
 
+  // keep debug only in logs, not in Discord
   if (debug.length) {
-    lines.push("\n_Debug:_\n" + debug.join("\n"));
+    console.log("Debug:");
+    console.log(debug.join("\n"));
   }
 
   await sendDiscord(lines.join("\n"));
