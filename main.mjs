@@ -25,8 +25,6 @@ const CACHE_FILE = "views_cache.json";
 // helpers
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const fmtInt = (x) => (x ?? 0).toLocaleString("en-US");
-
 // 300K / 8.2M style
 function fmtShort(num) {
   const x = Number(num ?? 0);
@@ -170,10 +168,10 @@ function normalizePost(handle, raw) {
     createMs = createTime > 2_000_000_000 ? createTime : createTime * 1000;
   }
 
-  const url =
-    raw.shareUrl ||
-    raw.share_url ||
-    (id ? `https://www.tiktok.com/@${handle}/video/${id}` : "");
+  // Always force standard TikTok URL when we have an id
+  const url = id
+    ? `https://www.tiktok.com/@${handle}/video/${id}`
+    : (raw.shareUrl || raw.share_url || "");
 
   return { handle, id, url, views, likes, comments, createMs };
 }
@@ -253,7 +251,7 @@ async function getRecentPostsForSecUid(handle, secUid) {
   posts.sort((a, b) => b.gained - a.gained);
   const top = posts.slice(0, TOP_N);
 
-  // build compact message like your reference
+  // build compact message
   const lines = [];
   lines.push(`**Check Notification (last ${WINDOW_LABEL_HOURS}H)**`);
   lines.push("");
@@ -267,7 +265,7 @@ async function getRecentPostsForSecUid(handle, secUid) {
         `[Post Link](${p.url}) | [@${p.handle}](https://www.tiktok.com/@${p.handle}) | ` +
         `${fmtShort(p.views)} views | ${fmtShort(p.likes)} likes | ${fmtShort(p.comments)} coms.`
       );
-      lines.push(`posted ${ago(now, p.createMs)} ago`);
+      lines.push(`posted ${ago(now, p.createMs)}`);
       if (i !== top.length - 1) lines.push("");
     });
   }
