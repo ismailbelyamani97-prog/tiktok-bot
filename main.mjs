@@ -1,6 +1,5 @@
 // main.mjs
-// Top 10 posts that gained the most views since the last run (view delta)
-// Uses TikAPI
+// TikTok view gainer tracker using TikAPI + Discord embed
 // Secrets: DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID, TIKAPI_KEY
 // Input: accounts.txt (one handle per line, no "@")
 
@@ -12,15 +11,18 @@ const TIKAPI_KEY = process.env.TIKAPI_KEY;
 
 const TIKAPI_BASE = "https://api.tikapi.io";
 
-// label only, the time window of the update, not used in logic
+// label only, describes how often the bot runs
 const WINDOW_LABEL_HOURS = 8;
 
 // TikAPI limits
 const MAX_POSTS_PER_ACCOUNT = 30;
 const TOP_N = 10;
 
-// where we store last known view counts
+// cache file for previous view counts
 const CACHE_FILE = "views_cache.json";
+
+// green embed color (vertical bar)
+const EMBED_COLOR = 0x00ff66;
 
 // helpers
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -28,13 +30,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // 300K / 8.2M style
 function fmtShort(num) {
   const x = Number(num ?? 0);
-  if (x >= 1_000_000_000) return (x / 1_000_000_000).toFixed(1) + "B";
-  if (x >= 1_000_000) return (x / 1_000_000).toFixed(1) + "M";
-  if (x >= 1_000) return (x / 1_000).toFixed(1) + "K";
+  if (x >= 1_000_000_000) return (x / 1_000_000_000).toFixed(1).replace(/\.0$/, "") + "B";
+  if (x >= 1_000_000) return (x / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
+  if (x >= 1_000) return (x / 1_000).toFixed(1).replace(/\.0$/, "") + "K";
   return x.toString();
 }
 
-// "4 day(s) ago" style
+// "4 day(s) ago"
 const ago = (now, tMs) => {
   if (!tMs) return "";
   const s = Math.floor((now - tMs) / 1000);
@@ -56,19 +58,21 @@ async function readHandles() {
     .map((s) => s.replace(/^@+/, ""));
 }
 
-async function sendDiscord(text) {
-  const chunks = text.match(/[\s\S]{1,1800}/g) || [];
-  for (const c of chunks) {
-    await fetch(`https://discord.com/api/v10/channels/${CHANNEL_ID}/messages`, {
-      method: "POST",
-      headers: {
-        authorization: `Bot ${BOT_TOKEN}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ content: c, flags: 4 }), // 4 = suppress embeds
-    });
-    await sleep(250);
-  }
+// Discord embed sender
+async function sendDiscordEmbed(embed) {
+  const body = {
+    content: "",
+    embeds: [embed],
+  };
+
+  await fetch(`https://discord.com/api/v10/channels/${CHANNEL_ID}/messages`, {
+    method: "POST",
+    headers: {
+      authorization: `Bot ${BOT_TOKEN}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
 }
 
 // cache helpers
@@ -126,7 +130,7 @@ async function getSecUidFromUsername(username) {
   return secUid;
 }
 
-// normalize a single post
+// normalize a single post object
 function normalizePost(handle, raw) {
   const stats = raw.stats || raw.statistics || {};
   const views = Number(
@@ -166,7 +170,6 @@ function normalizePost(handle, raw) {
     createMs = createTime > 2_000_000_000 ? createTime : createTime * 1000;
   }
 
-  // Always force standard TikTok URL when we have an id
   const url = id
     ? `https://www.tiktok.com/@${handle}/video/${id}`
     : (raw.shareUrl || raw.share_url || "");
@@ -189,6 +192,34 @@ async function getRecentPostsForSecUid(handle, secUid) {
     [];
 
   return items.map((raw) => normalizePost(handle, raw));
+}
+
+// build embed.description text
+function buildDescription(topPosts, now) {
+  let desc = `**Check Notification (last ${WINDOW_LABEL_HOURS}H)**\n\n`;
+
+  if (!topPosts.length) {
+    desc += "No posts gained views since last check.";
+    return desc;
+  }
+
+  topPosts.forEach((p, i) => {
+    const header = `${i + 1}. Post gained ${fmtShort(p.gained)} views`;
+    const line2 =
+      `[Post Link](${p.url}) | ` +
+      `[@${p.handle}](https://www.tiktok.com/@${p.handle}) | ` +
+      `${fmtShort(p.views)} views | ${fmtShort(p.likes)} likes | ${fmtShort(p.comments)} coms.`;
+    const line3 = `posted ${ago(now, p.createMs)}`;
+
+    const block = `${header}\n${line2}\n${line3}\n\n`;
+
+    // keep under 4000 chars to stay safe for embed description
+    if ((desc + block).length <= 4000) {
+      desc += block;
+    }
+  });
+
+  return desc.trimEnd();
 }
 
 // main
@@ -249,33 +280,20 @@ async function getRecentPostsForSecUid(handle, secUid) {
   posts.sort((a, b) => b.gained - a.gained);
   const top = posts.slice(0, TOP_N);
 
-  // build compact message
-  const lines = [];
-  lines.push(`**Check Notification (last ${WINDOW_LABEL_HOURS}H)**`);
-  lines.push("");
-
-  if (!top.length) {
-    lines.push("No posts gained views since last check.");
-  } else {
-    top.forEach((p, i) => {
-      lines.push(`${i + 1}. Post gained ${fmtShort(p.gained)} views`);
-      lines.push(
-        `[Post Link](${p.url}) | [@${p.handle}](https://www.tiktok.com/@${p.handle}) | ` +
-        `${fmtShort(p.views)} views | ${fmtShort(p.likes)} likes | ${fmtShort(p.comments)} coms.`
-      );
-      lines.push(`posted ${ago(now, p.createMs)}`);
-      if (i !== top.length - 1) lines.push("");
-    });
-  }
-
   if (debug.length) {
     console.log("Debug:");
     console.log(debug.join("\n"));
   }
 
-  // turn whole thing into a single quote block with green vertical line
-  const quoted = lines.map((l) => `> ${l}`).join("\n");
+  const description = buildDescription(top, now);
 
-  await sendDiscord(quoted);
+  const embed = {
+    title: "", // we put title inside description as bold, to match your reference
+    description,
+    color: EMBED_COLOR,
+    timestamp: new Date().toISOString(),
+  };
+
+  await sendDiscordEmbed(embed);
   console.log("Done");
 })();
