@@ -29,3 +29,15 @@ jobs:
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
           TIKAPI_KEY: ${{ secrets.TIKAPI_KEY }}
         run: node main.mjs
+
+      - name: Commit views cache
+        run: |
+          if [ -f views_cache.json ]; then
+            if [ -n "$(git status --porcelain views_cache.json)" ]; then
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git add views_cache.json
+              git commit -m "Update views cache"
+              git push
+            fi
+          fi
